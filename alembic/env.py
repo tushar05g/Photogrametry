@@ -10,8 +10,8 @@ from alembic import context
 # Add the project root to sys.path
 sys.path.insert(0, os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
 
-from app.db import Base
-from app.models import ScanJob # import models to register with Base
+from backend.core.db import Base
+from backend.models.models import ScanJob # import models to register with Base
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

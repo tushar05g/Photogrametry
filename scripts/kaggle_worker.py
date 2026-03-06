@@ -24,16 +24,22 @@ API_SECRET = "VimOI9Zi1dPIyc7x0rzC_JChl8I"
 # This allows the GPU (OpenGL) to initialize without a real monitor.
 
 def install_dependencies():
-    """Checks for COLMAP and XVFB."""
-    print("📋 Checking for COLMAP & XVFB...")
+    """Checks for COLMAP, XVFB, and Python packages."""
+    print("📋 Checking for COLMAP & XVFB & Python Packages...")
     try:
-        subprocess.run(["colmap", "-h"], capture_output=True)
-        subprocess.run(["xvfb-run", "--help"], capture_output=True)
-        print("✅ System dependencies are ready!")
+        # 🏎️ TURBO BOOT: Only install if core libraries are missing
+        import cloudinary
+        import rembg
+        import cv2 # opencv-python-headless
+        print("✅ System dependencies are already cached and ready!")
     except (FileNotFoundError, ImportError):
-        print("⚙️ Installing GPU Tools (COLMAP + XVFB + Cloudinary)...")
+        print("⚙️ Installing GPU Tools (COLMAP + XVFB + Cloudinary + Rembg)...")
         os.system("apt-get update -qq && apt-get install -y -qq colmap xvfb")
-        os.system("pip install -q cloudinary")
+        # Consolidated install to prevent fighting between pip calls
+        # 1. Force remove any GUI-enabled OpenCV or conflicting ONNX runtimes
+        print("📦 Synchronizing Python Stack (this may take a minute)...")
+        os.system("python3 -m pip uninstall -y -q opencv-python opencv-contrib-python opencv-python-headless onnxruntime")
+        os.system("python3 -m pip install -q --no-warn-conflicts 'numpy>=2.0' 'onnxruntime-gpu' 'rembg' 'cloudinary' 'pillow<10.1.0' 'protobuf' 'opencv-python-headless'")
 
 def upload_to_cloudinary(file_path):
     """Uploads the final 3D file to your Cloudinary account."""
@@ -59,14 +65,35 @@ def run_colmap_command(args, use_gpu=True):
         print(f"🛠️ Executing: {' '.join(args)}")
     
     try:
-        subprocess.check_call(full_cmd)
+        # 🛡️ RESILIENCE: Added a 10-minute timeout to prevent jobs from hanging indefinitely
+        subprocess.check_call(full_cmd, timeout=600)
+    except subprocess.TimeoutExpired:
+        print(f"⏰ COLMAP Command Timed Out after 10 mins: {' '.join(args)}")
+        raise Exception("Reconstruction took too long. Try uploading fewer or smaller images.")
     except subprocess.CalledProcessError as e:
         print(f"❌ COLMAP Command Failed: {e}")
         # Fallback to CPU if GPU still fails (Safety First)
         if use_gpu:
             print("⚠️ GPU Failed! Retrying on CPU (this will be slower)...")
-            cpu_args = [a for a in args if "use_gpu" not in a]
-            cpu_args.extend(["--SiftExtraction.use_gpu", "0", "--SiftMatching.use_gpu", "0"])
+            
+            # Robustly filter out GPU-related arguments and their values
+            cpu_args = []
+            skip_next = False
+            for i, arg in enumerate(args):
+                if skip_next:
+                    skip_next = False
+                    continue
+                if "use_gpu" in arg:
+                    skip_next = True # Skip the value (0 or 1) that follows
+                    continue
+                cpu_args.append(arg)
+            
+            # Add the correct CPU flag based on the command type
+            if "feature_extractor" in args:
+                cpu_args.extend(["--SiftExtraction.use_gpu", "0"])
+            elif "exhaustive_matcher" in args:
+                cpu_args.extend(["--SiftMatching.use_gpu", "0"])
+            
             subprocess.check_call(cpu_args)
         else:
             raise e
@@ -98,19 +125,75 @@ def process_job(job_id):
         return
 
     # 2. Workspace Prep
-    if os.path.exists("input_images"): shutil.rmtree("input_images")
-    if os.path.exists("output"): shutil.rmtree("output")
-    os.makedirs("input_images", exist_ok=True)
-    os.makedirs("output", exist_ok=True)
-    db_path = "database.db"
-    if os.path.exists(db_path): os.remove(db_path)
+    job_dir = f"job_{job_id}"
+    input_dir = os.path.join(job_dir, "input")
+    output_dir = os.path.join(job_dir, "output")
+    db_path = os.path.join(job_dir, "database.db")
 
-    # 3. Download
+    if os.path.exists(job_dir): shutil.rmtree(job_dir)
+    os.makedirs(input_dir, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
+
+    # 3. Download & Segregate Object (rembg)
+    print("✂️ [STAGE 0] Removing Backgrounds (Object Segregation)...")
+    rembg_remove = None
+    try:
+        from rembg import remove as _rembg_remove
+        rembg_remove = _rembg_remove
+        from PIL import Image
+        import io
+    except ImportError as e:
+        print(f"⚠️ rembg import failed: {e}")
+
+    job_warnings = []
+    remove_bg = True # ✂️ Set to False if you want to skip masking
+
     for i, url in enumerate(images):
+        if i % 5 == 0 and not check_job_status(job_id): return
         img_data = requests.get(url).content
-        filename = f"input_images/img_{i:03d}.jpg"
-        with open(filename, 'wb') as f: f.write(img_data)
-        print(f"   📥 Downloaded {i+1}/{len(images)}")
+        filename = os.path.join(input_dir, f"img_{i:03d}.jpg")
+        
+        # Apply Background Removal if requested and available
+        if remove_bg and rembg_remove:
+            try:
+                # 🛠️ BYPASS PIL: Pass bytes directly to rembg to avoid 'mode' setter errors
+                output_data = rembg_remove(img_data)
+                
+                # Convert result to high-quality JPEG
+                with Image.open(io.BytesIO(output_data)) as masked_img:
+                    # Ensure it's RGB (force white background if it was transparent)
+                    if masked_img.mode in ("RGBA", "P"):
+                        background = Image.new("RGB", masked_img.size, (255, 255, 255))
+                        background.paste(masked_img, mask=masked_img.split()[3]) # 3 is alpha
+                        final_save = background
+                    else:
+                        final_save = masked_img.convert("RGB")
+                    
+                    final_save.save(filename, "JPEG", quality=95)
+                
+                print(f"   ✂️ Masked & Saved {i+1}/{len(images)}")
+            except Exception as e:
+                warn_msg = f"Masking failed for image {i+1}: {str(e)[:100]}"
+                print(f"   ⚠️ {warn_msg}")
+                job_warnings.append(warn_msg)
+                with open(filename, 'wb') as f: f.write(img_data)
+        else:
+            with open(filename, 'wb') as f: f.write(img_data)
+            print(f"   📥 Downloaded {i+1}/{len(images)}")
+
+    # 💡 Memory Cleanup: Force remove rembg from GPU before COLMAP starts
+    if remove_bg and rembg_remove:
+        # 🛡️ Report warnings back to server so user knows the model might be imperfect
+        if job_warnings:
+            requests.patch(f"{NGROK_URL}/scans/{job_id}", json={
+                "warnings": " | ".join(job_warnings)
+            })
+            
+        # Clear memory
+        del rembg_remove
+        import gc
+        gc.collect()
+        print("🧱 Snapshot: GPU Memory purge complete.")
 
     # 4. Update PC status
     requests.patch(f"{NGROK_URL}/scans/{job_id}", json={"status": "processing"})
@@ -121,9 +204,11 @@ def process_job(job_id):
         run_colmap_command([
             "colmap", "feature_extractor", 
             "--database_path", db_path, 
-            "--image_path", "input_images",
-            "--SiftExtraction.use_gpu", "1",     # 🔥 ENABLE GPU
-            "--SiftExtraction.max_image_size", "2400" # High-quality processing
+            "--image_path", input_dir,
+            "--SiftExtraction.use_gpu", "1",
+            "--SiftExtraction.max_image_size", "2400",
+            "--SiftExtraction.max_num_features", "16384",
+            "--SiftExtraction.estimate_affine_shape", "1"
         ])
 
         if not check_job_status(job_id): return
@@ -131,32 +216,31 @@ def process_job(job_id):
         run_colmap_command([
             "colmap", "exhaustive_matcher", 
             "--database_path", db_path,
-            "--SiftMatching.use_gpu", "1"      # 🔥 ENABLE GPU
+            "--SiftMatching.use_gpu", "1",
+            "--SiftMatching.max_num_matches", "32768"
         ])
 
         if not check_job_status(job_id): return
         print("🏗️ [STAGE 3] Building 3D Structure...")
-        # Mapper doesn't use OpenGL, so standard run is fine
         run_colmap_command([
             "colmap", "mapper", 
             "--database_path", db_path, 
-            "--image_path", "input_images", 
-            "--output_path", "output"
+            "--image_path", input_dir, 
+            "--output_path", output_dir
         ], use_gpu=False)
 
-        # Check if reconstruction worked - find the first folder with a model
-        subdirs = [d for d in os.listdir("output") if os.path.isdir(os.path.join("output", d))]
+        # Check if reconstruction worked
+        subdirs = [d for d in os.listdir(output_dir) if os.path.isdir(os.path.join(output_dir, d))]
         if not subdirs:
             raise Exception("COLMAP failed to triangulate any points. Try taking more overlapping photos!")
         
-        # Usually '0', but could be others if multiple trials happened
-        model_dir = os.path.join("output", sorted(subdirs)[0])
+        model_dir = os.path.join(output_dir, sorted(subdirs)[0])
         print(f"📍 Using reconstruction from: {model_dir}")
 
         if not check_job_status(job_id): return
 
         print("📦 [STAGE 4] Converting to .PLY Mesh...")
-        result_file = "output/model.ply"
+        result_file = os.path.join(output_dir, "model.ply")
         run_colmap_command([
             "colmap", "model_converter", 
             "--input_path", model_dir, 
@@ -175,6 +259,8 @@ def process_job(job_id):
                     "model_url": final_url
                 })
                 print(f"🎉 MISSION COMPLETE! Model: {final_url}")
+                # Cleanup
+                shutil.rmtree(job_dir)
             else:
                 raise Exception("Cloudinary upload failed.")
         else:
@@ -186,6 +272,7 @@ def process_job(job_id):
             "status": "failed",
             "error_message": str(e)
         })
+        if os.path.exists(job_dir): shutil.rmtree(job_dir)
 
 def start_polling():
     install_dependencies()

@@ -1,19 +1,4 @@
-version: "3.9"
-
 services:
-  db:
-    image: postgres:15
-    container_name: scanner_db
-    restart: always
-    environment:
-      POSTGRES_USER: scanner
-      POSTGRES_PASSWORD: scannerpass
-      POSTGRES_DB: scannerdb
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-
   api:
     build: .
     container_name: scanner_api
@@ -22,10 +7,5 @@ services:
       - .:/code
     ports:
       - "8000:8000"
-    depends_on:
-      - db
-    environment:
-      DATABASE_URL: postgresql://scanner:scannerpass@db:5432/scannerdb
-
-volumes:
-  postgres_data:
+    env_file:
+      - .env

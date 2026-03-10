@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "3d-scanner"
+version = "3.0.0"
+description = "Production-ready 3D scanner with Gaussian Splatting"
+authors = [{name = "Morphic Team"}]
+dependencies = [
+    "alembic==1.18.4",
+    "cloudinary==1.44.1",
+    "fastapi==0.115.8",
+    "httpx",
+    "imagehash",
+    "opencv-python-headless==4.13.0.92",
+    "Pillow>=8.0,<12.0",
+    "psycopg2-binary==2.9.11",
+    "python-dotenv==1.2.2",
+    "python-multipart==0.0.22",
+    "redis",
+    "requests==2.32.5",
+    "sqlalchemy==2.0.38",
+    "uvicorn==0.41.0",
+    "pytest==8.3.4",
+    "pytest-asyncio==0.21.1",
+    "numpy==2.4.3",
+    "protobuf>=4.25.1",
+    "scipy>=1.8,<1.17",
+    "numba>=0.60,<0.63",
+    "packaging>=23.2,<26.0",
+    "slowapi"
+]
+requires-python = ">=3.11"
+
+[tool.setuptools]
+packages = ["backend"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+addopts = "-v --tb=short"

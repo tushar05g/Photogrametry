@@ -11,15 +11,7 @@ from backend.models import schemas
 
 router = APIRouter()
 
-# 🎓 TEACHER'S NOTE:
-# This "get_db" function is a generator. It opens a connection to Neon DB
-# for each request and closes it automatically when done.
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+from backend.core.db import SessionLocal, get_db
 
 def validate_cloudinary_url(url: str):
     """🛡️ SSRF PROTECTION: Ensures the URL is actually from our Cloudinary account."""
@@ -109,9 +101,11 @@ async def upload_scans(
             # We don't want to fail the whole upload if OpenCV fails
             print(f"Coin detection error: {e}")
 
-    # 4. FINAL STEP: Release the job to Kaggle!
+    # 4. FINAL STEP: Release the job to Redis queue!
+    from backend.queue.manager import enqueue_job
     job.status = JobStatus.pending
     db.commit()
+    enqueue_job(str(job.id))  # Push to Redis queue instead of HTTP polling
 
     return {
         "job_id": job.id,
@@ -164,12 +158,11 @@ def create_job_from_urls(
     # --- STEP 1: Validate the dataset BEFORE creating any DB records ---
     validation_result = validate_dataset(payload.images)
     if not validation_result["valid"]:
+        # JOIN the errors into a single string to avoid [object Object] issues
+        error_msg = " | ".join(validation_result["errors"])
         raise HTTPException(
             status_code=422,
-            detail={
-                "message": "Dataset validation failed. Fix these issues before submitting.",
-                "errors": validation_result["errors"]
-            }
+            detail=f"Validation Failed: {error_msg}"
         )
 
     # --- STEP 2: Cancel previous active jobs (auto-cleanup) ---
@@ -274,6 +267,8 @@ def update_job(
         job.warnings = update_data.warnings
     if update_data.project_name:
         job.project_name = update_data.project_name
+    if update_data.progress:
+        job.progress = update_data.progress
 
     db.commit()
     db.refresh(job)

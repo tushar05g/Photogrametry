@@ -1,4 +1,8 @@
 <!DOCTYPE html>
+<!-- 🎓 TEACHER'S NOTE: This is your user interface!
+   It lets people upload photos and see 3D models.
+   Uses Three.js (a 3D graphics library) to display models in the browser.
+   The JavaScript at the bottom handles uploading files and talking to your API. -->
 <html lang="en">
 
 <head>
@@ -609,8 +613,7 @@
 
             try {
                 await fetch(`/scans/${jobId}`, { method: 'DELETE' });
-                jobHistory = jobHistory.filter(j => j.id !== jobId);
-                saveHistory();
+                await fetch(`/scans/${jobId}`, { method: 'DELETE' });
                 renderHistory();
                 if (currentJobId === jobId) {
                     currentJobId = null;
@@ -653,24 +656,23 @@
             if (!currentJobId) return;
 
             try {
-                const response = await fetch(`/scans/${currentJobId}`);
+                const response = await fetch(`/scans/${currentJobId}/progress`);
                 if (!response.ok) return;
                 const job = await response.json();
 
-                // Update history entry if status or name changed
-                const historyIdx = jobHistory.findIndex(j => j.id === currentJobId);
-                if (historyIdx !== -1) {
-                    let changed = false;
-                    if (jobHistory[historyIdx].status !== job.status) {
-                        jobHistory[historyIdx].status = job.status;
-                        changed = true;
+                    // History is now fully managed by the backend
+
+                // Update progress bar and status text
+                if (job.progress) {
+                    const progressMatch = job.progress.match(/(\d+)%/);
+                    if (progressMatch) {
+                        progBar.style.width = progressMatch[1] + "%";
                     }
-                    if (job.project_name && jobHistory[historyIdx].name !== job.project_name) {
-                        jobHistory[historyIdx].name = job.project_name;
-                        changed = true;
+                    let statusText = `<div class="status-badge">${job.progress}</div>`;
+                    if (job.warnings) {
+                        statusText += `<div style="color: #f59e0b; font-size: 0.8rem; margin-top: 4px;">⚠️ ${job.warnings}</div>`;
                     }
-                    if (job.model_url) jobHistory[historyIdx].model_url = job.model_url;
-                    if (changed) saveHistory();
+                    statusDiv.innerHTML = statusText;
                 }
 
                 if (job.status === 'completed') {
@@ -711,19 +713,22 @@
                     currentJobId = null;
                     localStorage.removeItem('currentJobId');
                 } else if (job.status === 'processing') {
-                    statusDiv.innerHTML = `<p style="color: var(--primary);">🏗️ Building your 3D model...</p>`;
-                    progBar.style.width = "85%";
+                    if (!job.progress) {
+                        statusDiv.innerHTML = `<p style="color: var(--primary);">🏗️ Building your 3D model...</p>`;
+                    }
                     progContainer.classList.add('scanning-active');
                     cancelBtn.style.display = "block";
                     setTimeout(checkStatus, 15000);
                 } else if (job.status === 'pending') {
-                    statusDiv.innerHTML = `<p style="color: #94a3b8;">🛰️ Waiting for GPU to wake up...</p>`;
-                    progBar.style.width = "60%";
+                    if (!job.progress) {
+                        statusDiv.innerHTML = `<p style="color: #94a3b8;">🛰️ Waiting for GPU to wake up...</p>`;
+                    }
                     cancelBtn.style.display = "block";
                     setTimeout(checkStatus, 10000);
                 } else {
-                    statusDiv.innerHTML = `<p style="color: #94a3b8;">📦 Preparing Job...</p>`;
-                    progBar.style.width = "20%";
+                    if (!job.progress) {
+                        statusDiv.innerHTML = `<p style="color: #94a3b8;">📦 Preparing Job...</p>`;
+                    }
                     cancelBtn.style.display = "block";
                     setTimeout(checkStatus, 10000);
                 }
@@ -831,7 +836,8 @@
 
                     checkStatus();
                 } else {
-                    statusDiv.innerHTML = `<p style="color: #ef4444;">Error: ${result.detail || "Server failed"}</p>`;
+                    const detail = typeof result.detail === 'object' ? JSON.stringify(result.detail) : result.detail;
+                    statusDiv.innerHTML = `<p style="color: #ef4444;">Error: ${detail || "Server failed"}</p>`;
                 }
             } catch (err) {
                 statusDiv.innerHTML = `<p style="color: #ef4444;">Interlink Failure: ${err.message}</p>`;

@@ -33,6 +33,7 @@ class ScanJobResponse(BaseModel):
     error_message: Optional[str] = None
     warnings: Optional[str] = None
     project_name: str = "Untitled Scan"
+    progress: Optional[str] = None
     images: List[ScanImageResponse] = []
 
     class Config:
@@ -53,6 +54,7 @@ class ScanJobSummary(BaseModel):
     created_at: datetime
     project_name: str
     model_url: Optional[str] = None
+    progress: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -70,3 +72,4 @@ class ScanJobUpdate(BaseModel):
     error_message: Optional[str] = None
     warnings: Optional[str] = None
     project_name: Optional[str] = None
+    progress: Optional[str] = None

@@ -1,3 +1,28 @@
+# Python
 .venv/
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environment and Secrets
+.env
+.env.local
+
+# Project Specific
+logs/*.log
+morphic_cache/
+job_*/
+splat_output/
+*.ply
+*.glb
+*.obj
+colmap_db.db
+sparse/
+
+# OS
+.DS_Store
+Thumbs.db

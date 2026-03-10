@@ -25,10 +25,21 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from datetime import datetime, timezone
 import httpx
+import logging
 
 from backend.core.db import SessionLocal
 from backend.models.models import ScanJob, JobStatus
 from backend.queue.manager import dequeue_job, queue_length
+import redis
+import json
+
+logger = logging.getLogger(__name__)
+
+import os
+# 🎓 TEACHER'S NOTE: Redis is like a super-fast database for temporary data.
+# We're using it to store worker info so it persists across server restarts.
+REDIS_URL = os.getenv("REDIS_URL", "redis://scanner_redis:6379/0")
+redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 
 router = APIRouter()
 
@@ -60,10 +71,28 @@ class WorkerInfo(BaseModel):
     last_seen: str
 
 
-# --- IN-MEMORY REGISTRY ---
-# 🎓 For simplicity, we store workers in memory. In production, this would be in Redis
-# so the registry persists across backend restarts.
-_WORKER_REGISTRY: dict[str, dict] = {}
+# --- REDIS-BASED REGISTRY ---
+# 🎓 Now using Redis for persistence! Workers survive server restarts.
+# Each worker is stored as a JSON object in Redis with key "worker:{worker_id}"
+
+def get_worker_registry():
+    """Get all workers from Redis."""
+    keys = redis_client.keys("worker:*")
+    workers = {}
+    for key in keys:
+        worker_id = key.split(":", 1)[1]
+        data = redis_client.get(key)
+        if data:
+            workers[worker_id] = json.loads(data)
+    return workers
+
+def set_worker(worker_id, data):
+    """Store worker data in Redis."""
+    redis_client.set(f"worker:{worker_id}", json.dumps(data))
+
+def delete_worker(worker_id):
+    """Remove worker from Redis."""
+    redis_client.delete(f"worker:{worker_id}")
 
 
 # --- ENDPOINTS ---
@@ -75,20 +104,20 @@ def register_worker(payload: WorkerRegistration):
     The worker says: "I'm alive! Here's my URL."
     We store this so we can send jobs to that worker later.
     """
-    _WORKER_REGISTRY[payload.worker_id] = {
+    set_worker(payload.worker_id, {
         "worker_id": payload.worker_id,
         "url": payload.url,
         "status": "idle",
         "last_seen": datetime.now(timezone.utc).isoformat()
-    }
-    print(f"🛰️ [Registry] Worker '{payload.worker_id}' registered at {payload.url}")
+    })
+    logger.info(f"🛰️ [Registry] Worker '{payload.worker_id}' registered at {payload.url}")
     return {"message": f"Worker '{payload.worker_id}' registered successfully."}
 
 
 @router.get("/list")
 def list_workers():
     """Returns all currently registered workers and their status."""
-    return {"workers": list(_WORKER_REGISTRY.values())}
+    return {"workers": list(get_worker_registry().values())}
 
 
 @router.get("/next-job")
@@ -102,7 +131,8 @@ def get_next_job_for_worker(worker_id: str, db: Session = Depends(get_db)):
     - Workers can join/leave at any time.
     - No job is lost if a worker crashes because the ID stays in the DB as "pending".
     """
-    if worker_id not in _WORKER_REGISTRY:
+    registry = get_worker_registry()
+    if worker_id not in registry:
         raise HTTPException(status_code=403, detail="Worker not registered. Call /workers/register first.")
 
     job_id = dequeue_job()
@@ -119,7 +149,9 @@ def get_next_job_for_worker(worker_id: str, db: Session = Depends(get_db)):
         return {"job_id": None, "message": "Job was cancelled or already taken"}
 
     # Mark worker as busy
-    _WORKER_REGISTRY[worker_id]["status"] = "busy"
+    worker_data = registry[worker_id]
+    worker_data["status"] = "busy"
+    set_worker(worker_id, worker_data)
 
     return {
         "job_id": str(job.id),
@@ -131,9 +163,12 @@ def get_next_job_for_worker(worker_id: str, db: Session = Depends(get_db)):
 @router.post("/{worker_id}/idle")
 def mark_worker_idle(worker_id: str):
     """Called by a worker when it finishes a job and is ready for more work."""
-    if worker_id in _WORKER_REGISTRY:
-        _WORKER_REGISTRY[worker_id]["status"] = "idle"
-        _WORKER_REGISTRY[worker_id]["last_seen"] = datetime.now(timezone.utc).isoformat()
+    registry = get_worker_registry()
+    if worker_id in registry:
+        worker_data = registry[worker_id]
+        worker_data["status"] = "idle"
+        worker_data["last_seen"] = datetime.now(timezone.utc).isoformat()
+        set_worker(worker_id, worker_data)
     return {"message": "Worker marked as idle"}
 
 
@@ -143,11 +178,12 @@ def get_queue_status():
     🎓 Admin endpoint: see the current state of the entire distributed system.
     Useful for debugging: are jobs stuck? Are workers idle or all busy?
     """
-    idle_workers = [w for w in _WORKER_REGISTRY.values() if w["status"] == "idle"]
-    busy_workers = [w for w in _WORKER_REGISTRY.values() if w["status"] == "busy"]
+    registry = get_worker_registry()
+    idle_workers = [w for w in registry.values() if w["status"] == "idle"]
+    busy_workers = [w for w in registry.values() if w["status"] == "busy"]
     return {
         "queue_depth": queue_length(),
-        "total_workers": len(_WORKER_REGISTRY),
+        "total_workers": len(registry),
         "idle_workers": len(idle_workers),
         "busy_workers": len(busy_workers),
     }

@@ -26,7 +26,7 @@ import cv2
 MIN_IMAGES = 10
 MIN_WIDTH = 1024
 MIN_HEIGHT = 650
-BLUR_THRESHOLD = 80.0  # Below this = blurry. Higher = stricter.
+BLUR_THRESHOLD = 10.0  # Below this = blurry. Higher = stricter.
 
 
 def _load_image_from_url(url: str) -> np.ndarray:

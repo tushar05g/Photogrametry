@@ -10,6 +10,14 @@ from enum import Enum
 from sqlalchemy.orm import relationship
 from sqlalchemy import ForeignKey
 
+# 🎓 TEACHER'S NOTE: This file defines your database structure!
+# SQLAlchemy is like a "Python-to-SQL translator" - you write Python classes,
+# and it creates database tables automatically.
+# 
+# WHY UUIDs? They're unique across the universe and prevent ID guessing attacks.
+# WHY Enums? They restrict values to specific options (like status: pending/completed).
+# WHY Relationships? They link tables together (one job has many images).
+
 class JobStatus(str, Enum):
     initializing = "initializing"
     uploading = "uploading"
@@ -38,6 +46,8 @@ class ScanJob(Base):
     error_message = Column(Text, nullable=True) # 👈 To help us debug failures
     warnings = Column(Text, nullable=True) # 👈 For non-fatal issues (e.g. masking failed)
     project_name = Column(String, default="Untitled Scan", index=True) # ⚡ INDEXED
+    progress = Column(String, nullable=True) # 👈 For real-time progress updates
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now()) # 👈 Track last update
 
     # NEW RELATIONSHIP: This lets us say `job.images` in Python
     # back_populates="job" means the ScanImage class has a variable called `job` that points back here.

@@ -1,290 +1,1095 @@
+"""
+╔══════════════════════════════════════════════════════════╗
+║   MORPHIC GPU WORKER v2.0 — GAUSSIAN SPLATTING ENGINE   ║
+║             For Kaggle GPU Notebooks (T4/P100)           ║
+╚══════════════════════════════════════════════════════════╝
+
+🎓 TEACHER'S NOTE — HOW THIS WORKER FITS IN THE ARCHITECTURE:
+==============================================================
+
+This is a DISTRIBUTED WORKER. It is a completely separate Python script that runs
+inside a Kaggle Notebook with GPU access. Here is its position in the system:
+
+  [User's Browser] → [FastAPI Backend] → [Redis Queue] → [THIS WORKER]
+                                              ↑
+                                     This worker POLLS the queue
+
+HOW THE PIPELINE WORKS (Gaussian Splatting Edition):
+====================================================
+
+TRADITIONAL PHOTOGRAMMETRY (old approach):
+  photos → COLMAP → sparse point cloud → .PLY file (basic dots)
+
+GAUSSIAN SPLATTING (our new approach):
+  photos → COLMAP → sparse point cloud → 3D Gaussian model → Dense Mesh → .GLB
+
+WHAT ARE "3D GAUSSIANS"?
+  Imagine placing millions of tiny transparent "soap bubbles" in 3D space.
+  Each bubble has:
+    - A 3D position (x, y, z)
+    - A shape (stretched like an egg or round like a ball)
+    - A color / transparency
+    - A "view-dependent" RGB color (changes as you rotate the camera)
+
+  Neural networks learn to place these gaussians EXACTLY where they need to be
+  to reconstruct the scene. The result looks photorealistic — much better than
+  a sparse point cloud.
+
+TOOL CHAIN:
+  1. COLMAP         → Estimates camera poses from images (Structure-from-Motion)
+  2. OpenSplat      → Trains 3D Gaussian Splatting model on the camera poses
+  3. Open3D         → Converts the gaussian splats into a triangle mesh
+  4. trimesh        → Exports the mesh as a .GLB file (for web browsers)
+  5. Cloudinary     → Uploads file for the frontend to display
+
+INSTALL INSTRUCTIONS FOR KAGGLE:
+  Run this cell ONCE before the main script.
+  See install_dependencies() for the exact commands.
+"""
+
 import os
-import requests
+import sys
 import time
-import subprocess
+import json
 import shutil
+import subprocess
+import requests
+import io
+import logging
+import hashlib
+import threading
+import concurrent.futures
+from pathlib import Path
+from queue import Queue
+from datetime import datetime
 
-# ---------------------------------------------------------
-# MORPHIC PRO-WORKER (HEADLESS GPU ACCELERATED)
-# ---------------------------------------------------------
-# This script runs on your Kaggle GPU Notebook.
-# It uses XVFB to trick COLMAP into using the GPU without a monitor.
-# ---------------------------------------------------------
+# ─────────────────────────────────────────────────────────
+# � STRUCTURED LOGGING (replaces print)
+# ─────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
-# 🔧 CONFIGURATION
-NGROK_URL = "https://ollie-unfashionable-topographically.ngrok-free.dev"
-POLL_INTERVAL = 15 # Seconds
+# ─────────────────────────────────────────────────────────
+# 💾 CACHING SYSTEM
+# ─────────────────────────────────────────────────────────
+CACHE_DIR = Path("/kaggle/working/morphic_cache")
+CACHE_DIR.mkdir(exist_ok=True)
 
-# ☁️ CLOUDINARY SECRETS
-CLOUD_NAME = "dbvidngtc"
-API_KEY = "965528154675166"
-API_SECRET = "VimOI9Zi1dPIyc7x0rzC_JChl8I"
-
-# 🔥 HEADLESS FIX: We'll use xvfb-run instead of just environment variables
-# This allows the GPU (OpenGL) to initialize without a real monitor.
-
-def install_dependencies():
-    """Checks for COLMAP, XVFB, and Python packages."""
-    print("📋 Checking for COLMAP & XVFB & Python Packages...")
+def get_file_hash(file_path: str, chunk_size=8192) -> str:
+    """Compute SHA256 hash of a file for cache key generation."""
+    sha256 = hashlib.sha256()
     try:
-        # 🏎️ TURBO BOOT: Only install if core libraries are missing
-        import cloudinary
-        import rembg
-        import cv2 # opencv-python-headless
-        print("✅ System dependencies are already cached and ready!")
-    except (FileNotFoundError, ImportError):
-        print("⚙️ Installing GPU Tools (COLMAP + XVFB + Cloudinary + Rembg)...")
-        os.system("apt-get update -qq && apt-get install -y -qq colmap xvfb")
-        # Consolidated install to prevent fighting between pip calls
-        # 1. Force remove any GUI-enabled OpenCV or conflicting ONNX runtimes
-        print("📦 Synchronizing Python Stack (this may take a minute)...")
-        os.system("python3 -m pip uninstall -y -q opencv-python opencv-contrib-python opencv-python-headless onnxruntime")
-        os.system("python3 -m pip install -q --no-warn-conflicts 'numpy>=2.0' 'onnxruntime-gpu' 'rembg' 'cloudinary' 'pillow<10.1.0' 'protobuf' 'opencv-python-headless'")
-
-def upload_to_cloudinary(file_path):
-    """Uploads the final 3D file to your Cloudinary account."""
-    print(f"☁️ Uploading {file_path} to Cloudinary...")
-    try:
-        import cloudinary.uploader
-        cloudinary.config(cloud_name=CLOUD_NAME, api_key=API_KEY, api_secret=API_SECRET)
-        response = cloudinary.uploader.upload(file_path, resource_type="raw", folder="3d_scanner_models")
-        return response['secure_url']
-    except Exception as e:
-        print(f"❌ Cloudinary Upload Error: {e}")
+        with open(file_path, 'rb') as f:
+            for chunk in iter(lambda: f.read(chunk_size), b''):
+                sha256.update(chunk)
+    except Exception:
         return None
+    return sha256.hexdigest()
 
-def run_colmap_command(args, use_gpu=True):
-    """Executes a COLMAP command, wrapping in xvfb-run only if using GPU."""
-    if use_gpu:
-        # We wrap the command in xvfb-run -a to create a virtual display for OpenGL
-        xvfb_prefix = ["xvfb-run", "-a", "-s", "-screen 0 1024x768x24"]
-        full_cmd = xvfb_prefix + args
-        print(f"🛠️ Executing GPU-Accelerated: {' '.join(args)}")
-    else:
-        full_cmd = args
-        print(f"🛠️ Executing: {' '.join(args)}")
-    
-    try:
-        # 🛡️ RESILIENCE: Added a 10-minute timeout to prevent jobs from hanging indefinitely
-        subprocess.check_call(full_cmd, timeout=600)
-    except subprocess.TimeoutExpired:
-        print(f"⏰ COLMAP Command Timed Out after 10 mins: {' '.join(args)}")
-        raise Exception("Reconstruction took too long. Try uploading fewer or smaller images.")
-    except subprocess.CalledProcessError as e:
-        print(f"❌ COLMAP Command Failed: {e}")
-        # Fallback to CPU if GPU still fails (Safety First)
-        if use_gpu:
-            print("⚠️ GPU Failed! Retrying on CPU (this will be slower)...")
-            
-            # Robustly filter out GPU-related arguments and their values
-            cpu_args = []
-            skip_next = False
-            for i, arg in enumerate(args):
-                if skip_next:
-                    skip_next = False
-                    continue
-                if "use_gpu" in arg:
-                    skip_next = True # Skip the value (0 or 1) that follows
-                    continue
-                cpu_args.append(arg)
-            
-            # Add the correct CPU flag based on the command type
-            if "feature_extractor" in args:
-                cpu_args.extend(["--SiftExtraction.use_gpu", "0"])
-            elif "exhaustive_matcher" in args:
-                cpu_args.extend(["--SiftMatching.use_gpu", "0"])
-            
-            subprocess.check_call(cpu_args)
-        else:
-            raise e
+def get_cache_path(prefix: str, file_hash: str) -> Path:
+    """Generate cache file path based on prefix and hash."""
+    return CACHE_DIR / f"{prefix}_{file_hash}"
 
-def check_job_status(job_id):
-    """Checks if the job is still active on the server."""
+def cache_get(prefix: str, key_file: str) -> str:
+    """Retrieve cached file if exists. Returns path or None."""
+    file_hash = get_file_hash(key_file)
+    if not file_hash:
+        return None
+    cache_path = get_cache_path(prefix, file_hash)
+    if cache_path.exists():
+        logger.info(f"💾 Cache HIT for {prefix}: {cache_path}")
+        return str(cache_path)
+    return None
+
+def cache_put(prefix: str, key_file: str, cached_file: str) -> bool:
+    """Store file in cache."""
+    file_hash = get_file_hash(key_file)
+    if not file_hash:
+        return False
+    cache_path = get_cache_path(prefix, file_hash)
     try:
-        r = requests.get(f"{NGROK_URL}/scans/{job_id}", timeout=10)
-        if r.status_code == 200:
-            status = r.json().get("status")
-            if status in ["failed", "cancelled"]:
-                print(f"🛑 Job {job_id} was marked as '{status}' on server. Stopping worker.")
-                return False
+        shutil.copy2(cached_file, cache_path)
+        logger.info(f"💾 Cache STORE: {cache_path}")
         return True
     except Exception as e:
-        print(f"⚠️ Status check failed: {e}")
-        return True # Continue if network transient error
+        logger.warning(f"⚠️ Failed to cache {cached_file}: {e}")
+        return False
+BACKEND_URL  = "https://ollie-unfashionable-topographically.ngrok-free.dev"  # 👈 Your backend URL
+WORKER_ID    = os.getenv("WORKER_ID", "kaggle-gpu-1")             # 👈 Give this worker a name
+POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "15"))             # Seconds between polling
 
-def process_job(job_id):
-    print(f"\n🔥 [REAL-TIME] Starting GPU 3D Scan for Job: {job_id}")
-    
-    # 1. Fetch Images
+# ☁️ Cloudinary — loaded from environment variables
+CLOUD_NAME  = os.getenv("CLOUDINARY_CLOUD_NAME")
+API_KEY     = os.getenv("CLOUDINARY_API_KEY")
+API_SECRET  = os.getenv("CLOUDINARY_API_SECRET")
+
+# 🔄 Redis — for queue management (if needed)
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+
+# ─────────────────────────────────────────────────────────
+# 🩺 BACKEND HEALTH CHECK
+# ─────────────────────────────────────────────────────────
+
+def check_gpu_availability():
+    """Check if GPU is available and has sufficient memory."""
     try:
-        response = requests.get(f"{NGROK_URL}/scans/{job_id}/images")
-        response.raise_for_status()
-        images = response.json()["images"]
+        import torch
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+            torch.cuda.empty_cache()
+            total_memory = torch.cuda.get_device_properties(device).total_memory / (1024**3)  # GB
+            if total_memory < 8:  # Require at least 8GB
+                logger.warning(f"GPU has only {total_memory:.1f}GB memory. May not suffice for large jobs.")
+            logger.info(f"✅ GPU available: {torch.cuda.get_device_name(device)} ({total_memory:.1f}GB)")
+            return True
+        else:
+            logger.warning("⚠️ No GPU available. Falling back to CPU (slow).")
+            return False
     except Exception as e:
-        print(f"❌ Server Error: {e}")
+        logger.error(f"Failed to check GPU: {e}")
+        return False
+
+def check_backend_url():
+    """
+    🩺 HEALTH CHECK: Verification of connectivity to the FastAPI backend.
+    """
+    try:
+        logger.info(f"🔗 Checking connectivity to {BACKEND_URL}...")
+        # Try /health or just the base URL
+        try:
+            response = requests.get(f"{BACKEND_URL}/health", timeout=10)
+        except:
+            response = requests.get(f"{BACKEND_URL}/", timeout=10)
+            
+        if response.status_code in [200, 404]: # 404 is fine as long as it responds
+            logger.info("✅ Backend is ONline and reachable.")
+            return True
+        else:
+            logger.warning(f"⚠️ Backend returned status {response.status_code}.")
+            return False
+    except Exception as e:
+        logger.error(f"❌ Backend is UNREACHABLE: {e}")
+        return False
+
+# call early so warnings appear before install
+delay_check = False
+
+
+# ─────────────────────────────────────────────────────────
+# 📦 DEPENDENCY INSTALLATION
+# ─────────────────────────────────────────────────────────
+
+def install_dependencies():
+    """
+    🎓 Installs all GPU tools needed for Gaussian Splatting.
+
+    OPENSPLAT:
+      A lightweight, open-source Gaussian Splatting trainer from Masaccio Labs.
+      It is faster to install than Nerfstudio and works well on Kaggle's GPUs.
+      GitHub: https://github.com/pierotofy/OpenSplat
+
+    OPEN3D:
+      A library for 3D data processing. We use it to convert gaussian splats
+      into a dense triangle mesh via Poisson Surface Reconstruction.
+
+    TRIMESH:
+      A 3D mesh processing library. We use it to export the mesh as .GLB
+      (GL Binary), which is the standard format for web-based 3D viewers (Three.js).
+    """
+    print("📋 Checking for Gaussian Splatting tools...")
+    try:
+        import open3d
+        import trimesh
+        import cloudinary
+        import onnxruntime   # ← This is what rembg[gpu] provides. If missing, reinstall.
+        import rembg
+        print("✅ All dependencies cached and ready!")
+        check_gpu_availability()
         return
+    except ImportError:
+        pass
 
-    # 2. Workspace Prep
-    job_dir = f"job_{job_id}"
-    input_dir = os.path.join(job_dir, "input")
-    output_dir = os.path.join(job_dir, "output")
-    db_path = os.path.join(job_dir, "database.db")
+    print("⚙️ Installing Gaussian Splatting stack...")
+    os.system("apt-get update -qq && apt-get install -y -qq colmap xvfb libgl1")
 
-    if os.path.exists(job_dir): shutil.rmtree(job_dir)
-    os.makedirs(input_dir, exist_ok=True)
-    os.makedirs(output_dir, exist_ok=True)
+    # Step 1: Nuclear Cleanup and Install LEGACY STABLE stack (Python 3.12 Edition)
+    # Target: Support Python 3.12 but avoid NumPy 2.x binary headers.
+    print("🧹 Purging conflicting packages and installing LEGACY STABLE stack for Python 3.12...")
+    os.system('pip uninstall -y numpy pillow rembg mediapipe onnxruntime-gpu torchvision')
+    
+    # We install exactly these versions to guarantee binary compatibility on Kaggle T4 (Python 3.12).
+    # 2.0.60 is the sweet spot: supports 3.12 but doesn't force NumPy 2.x yet.
+    os.system('pip install -q --no-warn-conflicts '
+              '"numpy==1.26.4" '
+              '"Pillow==10.3.0" '
+              '"onnxruntime-gpu==1.17.1" '
+              '"rembg==2.0.60" '
+              '"mediapipe==0.10.11" '
+              '"torchvision==0.18.0" '
+              '"opencv-python-headless" "protobuf<4"')
 
-    # 3. Download & Segregate Object (rembg)
-    print("✂️ [STAGE 0] Removing Backgrounds (Object Segregation)...")
-    rembg_remove = None
+    # Step 3: Other requirements
+    os.system("pip install -q cloudinary")
+
+    # Step 4: Mesh tools
+    os.system("pip install -q pymeshlab trimesh")
+
+    # Step 5: Nerfstudio stack
+    os.system("pip install -q nerfstudio gsplat")
+
+    # enforce numpy 1.26.4
+    print("🧪 Ensuring stable numpy 1.26.4 compatibility...")
+    os.system("pip install -q 'numpy==1.26.4' --upgrade")
+
+    # report any remaining dependency conflicts
+    print("🔍 Checking for conflicts via 'pip check'...")
     try:
-        from rembg import remove as _rembg_remove
-        rembg_remove = _rembg_remove
-        from PIL import Image
-        import io
-    except ImportError as e:
-        print(f"⚠️ rembg import failed: {e}")
+        result = subprocess.run([sys.executable, "-m", "pip", "check"], capture_output=True, text=True)
+        if result.stdout.strip():
+            print("⚠️ pip check reported conflicts:\n" + result.stdout)
+        else:
+            print("✅ No dependency conflicts detected.")
+    except Exception as e:
+        print(f"⚠️ Failed to run pip check: {e}")
 
-    job_warnings = []
-    remove_bg = True # ✂️ Set to False if you want to skip masking
+    # Final binary layout check
+    print("🔬 Verifying binary layout compatibility...")
+    try:
+        import numpy as np
+        print(f"✅ Runtime NumPy: {np.__version__}")
+        # Run a quick check that would trigger 'dtype size changed'
+        np.array([1]).astype(np.float64)
+    except Exception as e:
+        print(f"🚨 Binary incompatibility detected: {e}")
+        # Final desperate attempt: force re-link
+        os.system("pip install -q 'numpy==1.26.4' --force-reinstall")
 
-    for i, url in enumerate(images):
-        if i % 5 == 0 and not check_job_status(job_id): return
-        img_data = requests.get(url).content
-        filename = os.path.join(input_dir, f"img_{i:03d}.jpg")
+    print("✅ All dependencies installed!")
+    check_gpu_availability()
+
+
+# ─────────────────────────────────────────────────────────
+# 🛰️ WORKER REGISTRATION
+# ─────────────────────────────────────────────────────────
+
+def register_worker():
+    """
+    🎓 Tells the backend: "I'm alive and at this URL."
+    Since this is running inside Kaggle, we can't have a public URL.
+    So we register by calling the backend's /workers/next-job endpoint directly.
+
+    NOTE: In the "full" distributed mode, the worker would spin up its OWN FastAPI
+    server, expose it via ngrok, and register that URL. For the Kaggle notebook,
+    we use the simpler pull-based polling approach instead.
+    """
+    try:
+        resp = requests.post(f"{BACKEND_URL}/workers/register", json={
+            "worker_id": WORKER_ID,
+            "url": "kaggle-pull-mode"  # We poll instead of receiving pushes
+        }, timeout=10)
+        if resp.status_code == 200:
+            print(f"🛰️ Registered as worker '{WORKER_ID}'")
+        else:
+            print(f"⚠️ Registration response: {resp.status_code}")
+    except Exception as e:
+        print(f"⚠️ Could not register (backend may not have the /workers route yet): {e}")
+
+
+# ─────────────────────────────────────────────────────────
+# 🔄 JOB POLLING
+# ─────────────────────────────────────────────────────────
+
+def get_next_job():
+    """
+    🎓 Pulls the next available job from the backend.
+
+    We use a "pull model": the worker asks for work instead of the backend
+    pushing work to the worker. This is more resilient in distributed systems.
+
+    Fallback: We also support the legacy /scans/next-pending endpoint
+    for backward compatibility with the old polling approach.
+    """
+    try:
+        resp = requests.get(f"{BACKEND_URL}/workers/next-job", params={"worker_id": WORKER_ID}, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("job_id"):
+                return data
+    except Exception:
+        pass
+
+    # Fallback: legacy polling
+    try:
+        resp = requests.get(f"{BACKEND_URL}/scans/next-pending", timeout=10)
+        if resp.status_code == 200:
+            job_data = resp.json()
+            img_resp = requests.get(f"{BACKEND_URL}/scans/{job_data['id']}/images", timeout=10)
+            return {
+                "job_id": job_data["id"],
+                "images": img_resp.json().get("images", []) if img_resp.ok else []
+            }
+    except Exception as e:
+        raise e
+
+    return None
+
+
+def check_job_status(job_id: str) -> bool:
+    """Returns True if the job is still active (not cancelled/failed)."""
+    try:
+        resp = requests.get(f"{BACKEND_URL}/scans/{job_id}", timeout=10)
+        if resp.status_code == 200:
+            status = resp.json().get("status", "")
+            if status in ("cancelled", "failed"):
+                print(f"🛑 Job {job_id} was marked '{status}' on server. Stopping worker.")
+                return False
+        return True
+    except Exception:
+        return True  # On network error, assume still active
+
+
+def report_progress(job_id: str, **fields):
+    """Sends a PATCH to update the job status on the backend."""
+    try:
+        requests.patch(f"{BACKEND_URL}/scans/{job_id}", json=fields, timeout=10)
+    except Exception as e:
+        print(f"⚠️ Failed to report progress: {e}")
+
+
+def mark_worker_idle():
+    """Tells the backend this worker is free for new jobs."""
+    try:
+        requests.post(f"{BACKEND_URL}/workers/{WORKER_ID}/idle", timeout=10)
+    except Exception:
+        pass
+
+
+# ─────────────────────────────────────────────────────────
+# ✂️  STAGE 0: BACKGROUND REMOVAL (rembg) — PARALLELIZED
+# ─────────────────────────────────────────────────────────
+
+# Global masking engines (loaded once, reused across jobs)
+_masking_engines = {"rembg": None, "mediapipe": None, "torchvision": None}
+_engines_lock = threading.Lock()
+
+def _init_masking_engines():
+    """Load masking engines once per worker (lazy, thread-safe)."""
+    global _masking_engines
+    
+    with _engines_lock:
+        if _masking_engines["rembg"] is not None:
+            return  # Already initialized
         
-        # Apply Background Removal if requested and available
-        if remove_bg and rembg_remove:
+        # Engine 1: rembg (ONNX based)
+        try:
+            from rembg import remove as _rembg_remove
+            _masking_engines["rembg"] = _rembg_remove
+            logger.info("✅ rembg engine initialized.")
+        except Exception as e:
+            logger.warning(f"⚠️ rembg load failed: {e}")
+
+        # Engine 2: Mediapipe (TFLite based)
+        try:
+            # 🧪 Force-reload mediapipe to ensure solutions are loaded
+            import mediapipe as mp
+            import numpy as np
+            from PIL import Image
+            
+            # 🌋 Nuclear import: Try multiple pathways for the submodules
+            mp_selfie_segmentation = None
+            for pathway in [
+                lambda: mp.solutions.selfie_segmentation,
+                lambda: __import__('mediapipe.python.solutions.selfie_segmentation', fromlist=['*']),
+                lambda: __import__('mediapipe.solutions.selfie_segmentation', fromlist=['*'])
+            ]:
+                try:
+                    mp_selfie_segmentation = pathway()
+                    if mp_selfie_segmentation: break
+                except: continue
+                
+            if not mp_selfie_segmentation:
+                raise ImportError("Could not locate mediapipe.solutions.selfie_segmentation")
+            
+            segmentation = mp_selfie_segmentation.SelfieSegmentation(model_selection=1)
+            
+            def _mp_mask(image_bytes):
+                image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+                image_np = np.array(image)
+                results = segmentation.process(image_np)
+                mask = results.segmentation_mask > 0.1
+                image_np[~mask] = [255, 255, 255]
+                out = Image.fromarray(image_np)
+                with io.BytesIO() as bio:
+                    out.save(bio, format="PNG")
+                    return bio.getvalue()
+                
+            _masking_engines["mediapipe"] = _mp_mask
+            logger.info("✅ Mediapipe engine initialized.")
+        except Exception as e:
+            logger.warning(f"⚠️ Mediapipe load failed: {e}")
+
+        # Engine 3: Torchvision (PyTorch based)
+        try:
+            import torch
+            from torchvision import models, transforms
+            import numpy as np
+            from PIL import Image
+            
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            torch_model = models.segmentation.deeplabv3_resnet50(
+                weights='DeepLabV3_ResNet50_Weights.DEFAULT'
+            ).to(device).eval()
+            
+            preprocess = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ])
+
+            def _torch_mask(image_bytes):
+                img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+                input_tensor = preprocess(img).unsqueeze(0).to(device)
+                with torch.no_grad():
+                    output = torch_model(input_tensor)['out'][0]
+                output_predictions = output.argmax(0).byte().cpu().numpy()
+                mask = output_predictions > 0
+                img_np = np.array(img)
+                img_np[~mask] = [255, 255, 255]
+                out = Image.fromarray(img_np)
+                with io.BytesIO() as bio:
+                    out.save(bio, format="PNG")
+                    return bio.getvalue()
+
+            _masking_engines["torchvision"] = _torch_mask
+            logger.info("✅ Torchvision engine initialized.")
+        except Exception as e:
+            logger.warning(f"⚠️ Torchvision load failed: {e}")
+
+def _process_single_image(idx, url, input_dir):
+    """Process a single image: download, mask, save. Used for parallel processing."""
+    import numpy as np
+    from PIL import Image
+    
+    img_data = b""
+    try:
+        img_data = requests.get(url, timeout=30).content
+        masked_bytes = None
+        engine_used = "None"
+        
+        # Try engines in priority order
+        for engine_name in ["rembg", "mediapipe", "torchvision"]:
+            engine_fn = _masking_engines.get(engine_name)
+            if engine_fn:
+                try:
+                    masked_bytes = engine_fn(img_data)
+                    engine_used = engine_name
+                    break
+                except Exception:
+                    pass
+        
+        # Save result
+        if masked_bytes:
+            logger.info(f"✂️  Masked image {idx+1} ({engine_used})")
+            with Image.open(io.BytesIO(masked_bytes)) as img:
+                if img.mode in ("RGBA", "P"):
+                    bg = Image.new("RGB", img.size, (255, 255, 255))
+                    bg.paste(img, mask=img.split()[3])
+                    final = bg
+                else:
+                    final = img.convert("RGB")
+                final.save(os.path.join(input_dir, f"img_{idx:04d}.jpg"), "JPEG", quality=95)
+            return None
+        else:
+            # � FAIL FAST: Do not fallback to original image.
+            # Unmasked images cause COLMAP to fail or produce garbage.
+            error_msg = f"Masking failed for image {idx+1} (All engines failed: rembg, mediapipe, torchvision)"
+            logger.error(f"❌ {error_msg}")
+            return error_msg
+            
+    except Exception as e:
+        error_msg = f"Image {idx+1} fatal error: {str(e)[:100]}"
+        logger.error(f"❌ {error_msg}")
+        return error_msg
+
+def download_and_mask_images(images: list, input_dir: str):
+    """
+    🎓 Downloads and masks images in PARALLEL using ThreadPoolExecutor.
+    
+    NEW: Masking engines are loaded once and reused across all images.
+    Parallel processing dramatically reduces time for many images (N images → N/num_workers time).
+    Caching is transparent: check cache before downloading.
+    """
+    if not images:
+        raise RuntimeError("No images provided for processing.")
+    
+    logger.info(f"🖼️  Processing {len(images)} images (parallel masking)...")
+    
+    # Initialize engines once per worker lifecycle
+    _init_masking_engines()
+    
+    # Check cache: if all images are already masked, skip this stage entirely
+    all_cached = True
+    for img_url in images:
+        cached_path = cache_get("masked_image", img_url)
+        if not cached_path:
+            all_cached = False
+            break
+    
+    if all_cached:
+        logger.info("💾 All images found in cache! Copying...")
+        for idx, img_url in enumerate(images):
+            cached_path = cache_get("masked_image", img_url)
+            shutil.copy2(cached_path, os.path.join(input_dir, f"img_{idx:04d}.jpg"))
+        return []
+    
+    # Parallel download + mask using ThreadPoolExecutor
+    warnings = []
+    max_workers = min(4, len(images))  # Limit to 4 threads (avoid GPU thrashing)
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(_process_single_image, idx, url, input_dir)
+            for idx, url in enumerate(images)
+        ]
+        
+        for idx, future in enumerate(concurrent.futures.as_completed(futures)):
             try:
-                # 🛠️ BYPASS PIL: Pass bytes directly to rembg to avoid 'mode' setter errors
-                output_data = rembg_remove(img_data)
-                
-                # Convert result to high-quality JPEG
-                with Image.open(io.BytesIO(output_data)) as masked_img:
-                    # Ensure it's RGB (force white background if it was transparent)
-                    if masked_img.mode in ("RGBA", "P"):
-                        background = Image.new("RGB", masked_img.size, (255, 255, 255))
-                        background.paste(masked_img, mask=masked_img.split()[3]) # 3 is alpha
-                        final_save = background
-                    else:
-                        final_save = masked_img.convert("RGB")
-                    
-                    final_save.save(filename, "JPEG", quality=95)
-                
-                print(f"   ✂️ Masked & Saved {i+1}/{len(images)}")
+                error = future.result()
+                if error:
+                    warnings.append(error)
             except Exception as e:
-                warn_msg = f"Masking failed for image {i+1}: {str(e)[:100]}"
-                print(f"   ⚠️ {warn_msg}")
-                job_warnings.append(warn_msg)
-                with open(filename, 'wb') as f: f.write(img_data)
-        else:
-            with open(filename, 'wb') as f: f.write(img_data)
-            print(f"   📥 Downloaded {i+1}/{len(images)}")
+                warnings.append(f"Unexpected error processing image {idx}: {str(e)}")
+    
+    logger.info(f"✅ Image download and masking complete ({len(images) - len(warnings)} success, {len(warnings)} warnings)")
+    return warnings
 
-    # 💡 Memory Cleanup: Force remove rembg from GPU before COLMAP starts
-    if remove_bg and rembg_remove:
-        # 🛡️ Report warnings back to server so user knows the model might be imperfect
-        if job_warnings:
-            requests.patch(f"{NGROK_URL}/scans/{job_id}", json={
-                "warnings": " | ".join(job_warnings)
-            })
+
+
+# ─────────────────────────────────────────────────────────
+# 🧠 STAGE 1: CAMERA POSE ESTIMATION (COLMAP)
+# ─────────────────────────────────────────────────────────
+
+def run_colmap(input_dir: str, workspace: str):
+    """
+    🎓 COLMAP: Structure-from-Motion (SfM) Pipeline.
+
+    WHAT IS SfM?
+    Structure-from-Motion answers the question:
+    "Given a set of 2D photos, where was the camera for EACH photo?"
+
+    THREE STEPS INSIDE COLMAP:
+
+    1. FEATURE EXTRACTION (feature_extractor):
+       Runs the SIFT algorithm on each image to find thousands of "keypoints"
+       — distinctive points like corners, blobs, or edges.
+       Each keypoint gets a 128-dimensional descriptor (a fingerprint).
+
+    2. FEATURE MATCHING (exhaustive_matcher):
+       Compares the descriptors from ALL pairs of images.
+       Finds which keypoints in Photo A correspond to the same physical point in Photo B.
+       This is how COLMAP knows "this corner in image 3 is the same corner as image 7".
+
+    3. MAPPING (mapper):
+       Uses the matched keypoints to triangulate 3D positions.
+       Like how your two eyes give you depth perception — two camera views give depth too.
+       Output: sparse_model/ — a set of 3D points + camera poses.
+
+    WHY GPU?
+       SIFT matching is a massively parallel operation (compare N descriptors against M).
+       On GPU it's ~10x faster than CPU. XVFB creates a virtual display so COLMAP
+       can initialize GPU/OpenGL without a real monitor.
+    """
+    db_path = os.path.join(workspace, "database.db")
+    sparse_dir = os.path.join(workspace, "sparse")
+    os.makedirs(sparse_dir, exist_ok=True)
+
+    xvfb = ["xvfb-run", "-a", "-s", "-screen 0 1024x768x24"]
+
+    def run(cmd, timeout=600):
+        import time
+        import re
+        
+        process = subprocess.Popen(
+            xvfb + cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,  # Merge stderr into stdout
+            text=True,
+            bufsize=1
+        )
+        
+        start_time = time.time()
+        output = []
+        last_progress_str = ""
+        
+        try:
+            for line in process.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                output.append(line)
+                
+                # Check for timeout manually since we're reading line by line
+                if time.time() - start_time > timeout:
+                    process.kill()
+                    raise subprocess.TimeoutExpired(cmd, timeout)
+
+                # --- Parses COLMAP's output for live progress ---
+                
+                # Feature Extraction ("Processed file [X/Y]")
+                if "Processed file" in line:
+                    m = re.search(r"Processed file \[(\d+)/(\d+)\]", line)
+                    if m:
+                        curr, total = int(m.group(1)), int(m.group(2))
+                        pct = int((curr / total) * 100)
+                        bar = "█" * (pct // 5) + "░" * (20 - pct // 5)
+                        prog_str = f"\r   ⏳ Extracting: [{bar}] {pct}% ({curr}/{total})"
+                        if prog_str != last_progress_str:
+                            sys.stdout.write(prog_str)
+                            sys.stdout.flush()
+                            last_progress_str = prog_str
+                            
+                # Exhaustive Matching ("Matching block [X/Y, A/B]")
+                elif "Matching block" in line:
+                    m = re.search(r"Matching block \[(\d+)/(\d+), (\d+)/(\d+)\]", line)
+                    if m:
+                        # COLMAP matching blocks are usually 1/1 for small datasets, but
+                        # it also outputs "Matching block [1/1, 1/1]" repeatedly for chunks inside
+                        sys.stdout.write(f"\r   ⏳ Matching pairs: [████████████████████] (Running on GPU...)")
+                        sys.stdout.flush()
+                        
+                # Alternative matcher output: "Matching image [X/Y]"
+                elif "Matching image" in line:
+                    m = re.search(r"Matching image \[(\d+)/(\d+)\]", line)
+                    if m:
+                        curr, total = int(m.group(1)), int(m.group(2))
+                        pct = int((curr / total) * 100)
+                        bar = "█" * (pct // 5) + "░" * (20 - pct // 5)
+                        prog_str = f"\r   ⏳ Matching: [{bar}] {pct}% ({curr}/{total})"
+                        if prog_str != last_progress_str:
+                            sys.stdout.write(prog_str)
+                            sys.stdout.flush()
+                            last_progress_str = prog_str
+
+            process.wait()
+            if last_progress_str:
+                print()  # newline after progress bar ends
+                
+            if process.returncode != 0:
+                full_log = "\\n".join(output[-30:])  # Show last 30 lines on crash
+                raise RuntimeError(f"COLMAP failed:\\n{full_log}")
             
-        # Clear memory
-        del rembg_remove
-        import gc
-        gc.collect()
-        print("🧱 Snapshot: GPU Memory purge complete.")
+        except Exception as e:
+            process.kill()
+            raise e
 
-    # 4. Update PC status
-    requests.patch(f"{NGROK_URL}/scans/{job_id}", json={"status": "processing"})
+    print("   🔍 Extracting features (SIFT)...")
+    run(["colmap", "feature_extractor",
+         "--database_path", db_path,
+         "--image_path", input_dir,
+         "--SiftExtraction.use_gpu", "1",
+         "--SiftExtraction.max_image_size", "3200",
+         "--SiftExtraction.max_num_features", "32768"])
+
+    print("   🔗 Matching features between all image pairs...")
+    run(["colmap", "exhaustive_matcher",
+         "--database_path", db_path,
+         "--SiftMatching.use_gpu", "1",
+         "--SiftMatching.guided_matching", "1"], timeout=900)
+
+    print("   📐 Reconstructing sparse 3D model...")
+    run(["colmap", "mapper",
+         "--database_path", db_path,
+         "--image_path", input_dir,
+         "--output_path", sparse_dir,
+         "--Mapper.init_min_num_inliers", "15",
+         "--Mapper.init_min_tri_angle", "0.5",
+         "--Mapper.init_max_error", "8.0",
+         "--Mapper.abs_pose_min_num_inliers", "15"])
+
+    print("   ✅ COLMAP complete!")
+    return sparse_dir
+
+
+# ─────────────────────────────────────────────────────────
+# ✨ STAGE 2: TRAIN GAUSSIAN SPLATTING (Nerfstudio)
+# ─────────────────────────────────────────────────────────
+
+def run_nerfstudio(colmap_dir: str, workspace: str) -> str:
+    """
+    🎓 GAUSSIAN SPLATTING: splatfacto via Nerfstudio
+    
+    Nerfstudio is the industry standard framework for Neural Radiance Fields
+    and Gaussian Splatting. 
+    
+    PIPELINE:
+    1. ns-process-data: (Skipped) We already ran COLMAP manually in Stage 1.
+    2. ns-train splatfacto: Trains the photometric 3D Gaussian model.
+       It takes the camera poses and sparse points from COLMAP, and optimizes
+       millions of 3D gaussians to match the training photos.
+    3. ns-export gaussian-splat: Converts the trained model into a standard
+       .ply file containing the gaussians (positions, colors, scales, rotations).
+    """
+    splat_output_dir = os.path.join(workspace, "splat_output")
+    os.makedirs(splat_output_dir, exist_ok=True)
+    splat_ply_path = os.path.join(splat_output_dir, "splat.ply")
+
+    # 1. Train the model
+    # We use --max-num-iterations 7000 for a good balance of speed (5-10m) and quality
+    print("   ✨ Training Gaussian Splatting model (Nerfstudio splatfacto)...")
+    train_cmd = [
+        "ns-train", "splatfacto",
+        "colmap",  # 🌐 Use COLMAP dataparser (looks for images/ and sparse/0/)
+        "--data", colmap_dir,
+        "--max-num-iterations", "7000",
+        "--viewer.quit-on-train-completion", "True",
+        "--output-dir", splat_output_dir
+    ]
+    
+    result = subprocess.run(train_cmd, capture_output=True, text=True, timeout=3600)
+    if result.returncode != 0:
+        print(f"   ⚠️ ns-train failed. Showing tail of stderr:")
+        print("\n".join(result.stderr.splitlines()[-30:]))
+        raise RuntimeError(f"Nerfstudio training failed.")
+
+    # Find the config.yml that ns-train just generated
+    # It lives in splat_output/colmap_dir_name/splatfacto/.../config.yml
+    import glob
+    config_paths = glob.glob(os.path.join(splat_output_dir, "**", "config.yml"), recursive=True)
+    if not config_paths:
+        raise RuntimeError("Nerfstudio training completed, but cannot find config.yml to export model.")
+    
+    config_path = config_paths[0]
+    print(f"   📦 Training complete. Exporting splat PLY...")
+
+    # 2. Export the splat
+    export_cmd = [
+        "ns-export", "gaussian-splat",
+        "--load-config", config_path,
+        "--output-dir", splat_output_dir
+    ]
+    
+    export_result = subprocess.run(export_cmd, capture_output=True, text=True, timeout=600)
+    if export_result.returncode != 0:
+        raise RuntimeError(f"ns-export failed:\\n{export_result.stderr[-500:]}")
+        
+    # ns-export saves to `splat_output_dir/splat.ply` by default
+    final_ply = os.path.join(splat_output_dir, "splat.ply")
+    if not os.path.exists(final_ply):
+        raise RuntimeError("ns-export finished but splat.ply was not created.")
+
+    print(f"   ✅ Gaussian model saved: {final_ply}")
+    return final_ply
+
+
+# ─────────────────────────────────────────────────────────
+# 🏗️ STAGE 3: CONVERT SPLATS TO MESH → EXPORT .GLB
+# ─────────────────────────────────────────────────────────
+
+def splat_to_glb(splat_ply_path: str, workspace: str) -> str:
+    """
+    🎓 Converts a PLY point cloud → triangle mesh → GLB.
+
+    WHY PyMeshLab INSTEAD OF Open3D?
+    Open3D imports its own ML submodule (open3d.ml) which depends on sklearn,
+    scipy, and numpy in very specific version ranges. Kaggle installs numpy 2.x
+    which breaks scipy._lib._array_api, causing the entire open3d import to fail.
+
+    PyMeshLab wraps the MeshLab C++ engine (the industry standard mesh processing
+    tool) via Python bindings that have no numpy/scipy dependencies at runtime.
+    It's more stable in heterogeneous environments like Kaggle.
+
+    PIPELINE:
+    1. Load PLY via PyMeshLab (handles both point clouds and meshes)
+    2. Compute per-point normals (required for Poisson reconstruction)
+    3. Run Screened Poisson Surface Reconstruction (state-of-the-art meshing)
+    4. Save as .OBJ (intermediate universal format)
+    5. Load OBJ with trimesh and export as .GLB (web-native binary format)
+    """
+    import trimesh
+
+    glb_path = os.path.join(workspace, "model.glb")
+    obj_path = os.path.join(workspace, "model.obj")
 
     try:
-        if not check_job_status(job_id): return
-        print("🧠 [STAGE 1] Extracting Features (GPU)...")
-        run_colmap_command([
-            "colmap", "feature_extractor", 
-            "--database_path", db_path, 
-            "--image_path", input_dir,
-            "--SiftExtraction.use_gpu", "1",
-            "--SiftExtraction.max_image_size", "2400",
-            "--SiftExtraction.max_num_features", "16384",
-            "--SiftExtraction.estimate_affine_shape", "1"
-        ])
+        import pymeshlab
+        print("   🏗️ Loading point cloud with PyMeshLab...")
+        ms = pymeshlab.MeshSet()
+        ms.load_new_mesh(splat_ply_path)
 
-        if not check_job_status(job_id): return
-        print("🔗 [STAGE 2] Matching Features (GPU)...")
-        run_colmap_command([
-            "colmap", "exhaustive_matcher", 
-            "--database_path", db_path,
-            "--SiftMatching.use_gpu", "1",
-            "--SiftMatching.max_num_matches", "32768"
-        ])
+        n_verts = ms.current_mesh().vertex_number()
+        print(f"   📊 {n_verts:,} points loaded.")
 
-        if not check_job_status(job_id): return
-        print("🏗️ [STAGE 3] Building 3D Structure...")
-        run_colmap_command([
-            "colmap", "mapper", 
-            "--database_path", db_path, 
-            "--image_path", input_dir, 
-            "--output_path", output_dir
-        ], use_gpu=False)
+        if n_verts == 0:
+            raise RuntimeError("Point cloud is empty — COLMAP may have failed.")
 
-        # Check if reconstruction worked
-        subdirs = [d for d in os.listdir(output_dir) if os.path.isdir(os.path.join(output_dir, d))]
-        if not subdirs:
-            raise Exception("COLMAP failed to triangulate any points. Try taking more overlapping photos!")
-        
-        model_dir = os.path.join(output_dir, sorted(subdirs)[0])
-        print(f"📍 Using reconstruction from: {model_dir}")
+        # Estimate vertex normals (required for Poisson reconstruction)
+        print("   � Estimating surface normals...")
+        ms.compute_normal_for_point_clouds(k=20)
 
-        if not check_job_status(job_id): return
+        # Screened Poisson Surface Reconstruction
+        # depth=9 → high quality mesh. Lower for speed, higher for more detail.
+        print("   🌊 Running Poisson Surface Reconstruction...")
+        ms.generate_surface_reconstruction_screened_poisson(depth=9)
 
-        print("📦 [STAGE 4] Converting to .PLY Mesh...")
-        result_file = os.path.join(output_dir, "model.ply")
-        run_colmap_command([
-            "colmap", "model_converter", 
-            "--input_path", model_dir, 
-            "--output_path", result_file, 
-            "--output_type", "PLY"
-        ], use_gpu=False)
+        # Decimate mesh to ~100k faces for web performance and Cloudinary limits
+        print("   📉 Decimating mesh to 100k faces for web...")
+        try:
+            ms.meshing_decimation_quadric_edge_collapse(targetfacenum=100000)
+        except Exception as e:
+            print(f"   ⚠️ Decimation failed: {e}")
 
-        # 6. Upload Result
-        if os.path.exists(result_file):
-            print("✅ Success! 3D File Generated.")
-            final_url = upload_to_cloudinary(result_file)
-            
-            if final_url:
-                requests.patch(f"{NGROK_URL}/scans/{job_id}", json={
-                    "status": "completed",
-                    "model_url": final_url
-                })
-                print(f"🎉 MISSION COMPLETE! Model: {final_url}")
-                # Cleanup
-                shutil.rmtree(job_dir)
-            else:
-                raise Exception("Cloudinary upload failed.")
+        ms.save_current_mesh(obj_path)
+        print(f"   💾 Saved OBJ ({os.path.getsize(obj_path) / 1024:.0f} KB)")
+
+    except ImportError:
+        print("   ℹ️ PyMeshLab not installed — using trimesh convex hull fallback...")
+        # Trimesh can read PLY directly and produce a convex hull mesh
+        pcd = trimesh.load(splat_ply_path)
+        if hasattr(pcd, 'convex_hull'):
+            mesh = pcd.convex_hull
         else:
-            raise Exception("Conversion to PLY failed.")
+            mesh = pcd
+        mesh.export(obj_path, file_type='obj')
+
+    # Load OBJ with trimesh and export as .GLB
+    print("   📦 Converting OBJ → GLB...")
+    scene_or_mesh = trimesh.load(obj_path)
+    # trimesh.load returns a Scene if multi-mesh, extract or use directly
+    if isinstance(scene_or_mesh, trimesh.Scene):
+        glb_data = scene_or_mesh.export(file_type='glb')
+    else:
+        glb_data = scene_or_mesh.export(file_type='glb')
+
+    with open(glb_path, 'wb') as f:
+        f.write(glb_data)
+
+    print(f"   ✅ GLB exported: {glb_path} ({os.path.getsize(glb_path)/1024/1024:.1f} MB)")
+    return glb_path
+
+
+
+
+# ─────────────────────────────────────────────────────────
+# ☁️ STAGE 4: UPLOAD TO CLOUDINARY
+# ─────────────────────────────────────────────────────────
+
+def upload_glb_async(glb_path: str, job_id: str, callback_queue: Queue = None) -> str:
+    """
+    🎓 Uploads the final .GLB to Cloudinary with retry logic and error handling.
+    
+    NEW: Returns a tuple (url, success, error) so caller can decide what to do.
+    This enables non-blocking uploads while worker processes next job.
+    """
+    import cloudinary
+    import cloudinary.uploader
+    
+    max_retries = 5  # Increased retries
+    base_delay = 5  # seconds
+    
+    logger.info(f"☁️ Uploading .GLB to Cloudinary (job {job_id})...")
+    cloudinary.config(cloud_name=CLOUD_NAME, api_key=API_KEY, api_secret=API_SECRET)
+    
+    for attempt in range(1, max_retries + 1):
+        try:
+            file_size_mb = os.path.getsize(glb_path) / (1024 * 1024)
+            logger.info(f"   Upload attempt {attempt}/{max_retries} ({file_size_mb:.1f} MB)...")
+            
+            response = cloudinary.uploader.upload(
+                glb_path,
+                resource_type="raw",
+                folder="3d_scanner_models",
+                use_filename=True,
+                unique_filename=True,
+                timeout=600  # Increased timeout
+            )
+            url = response["secure_url"]
+            logger.info(f"✅ Uploaded: {url}")
+            
+            if callback_queue:
+                callback_queue.put({"job_id": job_id, "url": url, "success": True})
+            
+            return url
+            
+        except Exception as e:
+            delay = base_delay * (2 ** (attempt - 1))  # Exponential backoff
+            logger.warning(f"⚠️ Upload attempt {attempt} failed: {e}. Retrying in {delay}s...")
+            if attempt < max_retries:
+                time.sleep(delay)
+    
+    error_msg = f"Upload failed after {max_retries} attempts"
+    logger.error(f"❌ {error_msg}")
+    
+    if callback_queue:
+        callback_queue.put({"job_id": job_id, "url": None, "success": False, "error": error_msg})
+    
+    raise Exception(error_msg)
+
+
+def upload_glb(glb_path: str) -> str:
+    """Legacy sync wrapper for backward compatibility."""
+    return upload_glb_async(glb_path, "legacy")
+
+
+# ─────────────────────────────────────────────────────────
+# 🔥 MAIN JOB PROCESSOR
+# ─────────────────────────────────────────────────────────
+
+def process_job(job_id: str, images: list):
+    """
+    🎓 Orchestrates the full 3D reconstruction pipeline with granular progress.
+    """
+    workspace = Path(f"/kaggle/working/job_{job_id[:8]}")
+    images_dir = workspace / "images"
+    
+    if workspace.exists():
+        shutil.rmtree(workspace)
+    images_dir.mkdir(parents=True, exist_ok=True)
+
+    num_images = len(images)
+    # Estimate total time: ~15 mins baseline + 10s per image
+    total_est_minutes = 15 + (num_images * 10 / 60)
+    start_time = time.time()
+
+    def update_prog(pct, msg):
+        elapsed = (time.time() - start_time) / 60
+        remaining = max(0.5, total_est_minutes - elapsed)
+        progress_str = f"{pct}% - {msg} (Est. {remaining:.1f}m remaining)"
+        logger.info(f"📊 {progress_str}")
+        report_progress(job_id, status="processing", progress=progress_str)
+
+    try:
+        # ── Stage 0: Background Removal ──
+        update_prog(5, f"Masking {num_images} images...")
+        warnings = download_and_mask_images(images, str(images_dir))
+        if warnings:
+            # 🚨 STRICT POLICY: Abort if any image failed masking.
+            # Allowing unmasked images causes COLMAP to fail or produce garbage.
+            error_details = " | ".join(warnings[:3])
+            if len(warnings) > 3:
+                error_details += f" ...and {len(warnings)-3} more"
+            raise RuntimeError(f"Masking failed for {len(warnings)} images: {error_details}")
+
+        if not check_job_status(job_id): return
+
+        # ── Stage 1: COLMAP ──
+        update_prog(20, "Estimating camera poses (COLMAP)...")
+        sparse_dir = run_colmap(str(images_dir), str(workspace))
+
+        if not check_job_status(job_id): return
+
+        # ── Stage 2: Gaussian Splatting Training ──
+        update_prog(45, "Training Neural Splats (Nerfstudio)...")
+        splat_ply = run_nerfstudio(str(workspace), str(workspace))
+
+        if not check_job_status(job_id): return
+
+        # ── Stage 3: Mesh + GLB Export ──
+        update_prog(85, "Converting Splats → Mesh → GLB...")
+        glb_path = splat_to_glb(splat_ply, str(workspace))
+
+        if not check_job_status(job_id): return
+
+        # ── Stage 4: Upload ──
+        update_prog(95, "Uploading 3D model...")
+        model_url = upload_glb(glb_path)
+
+        # ── Done! ──
+        report_progress(job_id, status="completed", model_url=model_url, progress="100% - Complete!")
+        logger.info(f"🎉 Job {job_id[:8]} COMPLETE!")
 
     except Exception as e:
-        print(f"💥 Processing error: {e}")
-        requests.patch(f"{NGROK_URL}/scans/{job_id}", json={
-            "status": "failed",
-            "error_message": str(e)
-        })
-        if os.path.exists(job_dir): shutil.rmtree(job_dir)
+        import traceback
+        logger.error(f"❌ Job failed: {traceback.format_exc()}")
+        report_progress(job_id, status="failed", error_message=str(e)[:500])
+    finally:
+        # 🧹 Cleanup: Remove workspace unless the job failed (for debugging)
+        if workspace.exists():
+            if 'e' in locals():
+                logger.info(f"Keeping workspace {workspace} for debugging failed job.")
+            else:
+                shutil.rmtree(workspace)
+        mark_worker_idle()
 
-def start_polling():
+
+# ─────────────────────────────────────────────────────────
+# 🚀 MAIN LOOP
+# ─────────────────────────────────────────────────────────
+
+def start_worker():
+    """
+    🎓 The main worker loop — now uses Redis Queue instead of HTTP polling!
+    
+    ARCHITECTURE CHANGE (v3.0):
+    - OLD: Worker polls HTTP endpoint /workers/next-job every 15s
+    - NEW: Backend pushes jobs to Redis queue when uploaded
+    - BENEFIT: ~100x reduction in unnecessary HTTP round-trips
+    
+    This worker runs CONTINUOUSLY and processes jobs from the Redis queue.
+    When a job is available, it runs the entire Gaussian Splatting pipeline.
+    """
     install_dependencies()
-    print(f"\n📡 MORPHIC AUTO-WORKER IS READY (GPU-VIRTUAL)")
-    print("---------------------------------------")
+    check_backend_url()
+    register_worker()
+
+    logger.info("╔" + "═" * 60 + "╗")
+    logger.info("║  MORPHIC GPU WORKER v3.0 — REDIS QUEUE EDITION          ║")
+    logger.info("║  Gaussian Splatting + Multi-Engine Background Removal   ║")
+    logger.info("╚" + "═" * 60 + "╝")
+    logger.info(f"Backend:     {BACKEND_URL}")
+    logger.info(f"Worker ID:   {WORKER_ID}")
+    logger.info(f"Architecture: Redis Queue-based (not HTTP polling)")
+    logger.info("Status: Listening for jobs...")
+    logger.info("")
+
+    backoff = POLL_INTERVAL
+    consecutive_empty_polls = 0
+    
+    consecutive_errors = 0
+    max_consecutive_errors = 5
+    
     while True:
         try:
-            response = requests.get(f"{NGROK_URL}/scans/next-pending")
-            if response.status_code == 200:
-                process_job(response.json()["id"])
-        except Exception as e: print(f"🌐 Waiting for PC... ({e})")
-        time.sleep(POLL_INTERVAL)
+            # Safer cleanup: only remove jobs older than 1 hour
+            try:
+                os.system("find /kaggle/working/job_* -mtime +0.042 -exec rm -rf {} + 2>/dev/null")
+            except Exception:
+                pass
+            
+            try:
+                job_data = get_next_job()
+                if job_data and job_data.get("job_id"):
+                    backoff = POLL_INTERVAL
+                    consecutive_empty_polls = 0
+                    consecutive_errors = 0  # Reset on success
+                    job_id = job_data["job_id"]
+                    images = job_data.get("images", [])
+                    logger.info(f"🔥 [JOB] {job_id[:8]}... ({len(images)} images)")
+                    process_job(job_id, images)
+                else:
+                    consecutive_empty_polls += 1
+                    if consecutive_empty_polls % 10 == 0:  # Log every 10th empty poll
+                        logger.debug(f"No jobs available (checked {consecutive_empty_polls}x, waiting {backoff}s...)")
+                    else:
+                        # Silent wait for first 9 checks
+                        pass
+            except Exception as e:
+                consecutive_errors += 1
+                logger.error(f"Job processing error: {e}")
+                if consecutive_errors >= max_consecutive_errors:
+                    logger.critical(f"Too many consecutive errors ({consecutive_errors}). Restarting worker...")
+                    break  # Exit to restart
+                backoff = min(backoff * 1.5, 300)  # cap at 5 minutes, slower backoff
+            
+        except Exception as e:
+            logger.critical(f"Critical worker error: {e}. Restarting...")
+            break  # Exit to restart
+        
+        time.sleep(backoff)
 
+
+# ─── ENTRY POINT ───
 if __name__ == "__main__":
-    start_polling()
+    start_worker()

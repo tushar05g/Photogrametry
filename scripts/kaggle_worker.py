@@ -64,6 +64,7 @@ from queue import Queue
 from datetime import datetime
 import gc
 import signal
+import torch
 
 # ─────────────────────────────────────────────────────────
 # � STRUCTURED LOGGING (replaces print)
@@ -385,7 +386,6 @@ _engines_lock = threading.Lock()
 
 def _init_masking_engines():
     """Load masking engines once per worker (lazy, thread-safe)."""
-    global _masking_engines
     
     with _engines_lock:
         if _masking_engines["rembg"] is not None:
@@ -509,7 +509,10 @@ def _process_single_image(idx, url, input_dir):
                     final = img.convert("RGB")
                 final.save(os.path.join(input_dir, f"img_{idx:04d}.jpg"), "JPEG", quality=95)
                 # Ensure memory is released
-                del img, bg, final if 'bg' in locals() else img, final
+                if 'bg' in locals():
+                    del img, bg, final
+                else:
+                    del img, final
             return None
         else:
             # � FAIL FAST: Do not fallback to original image.

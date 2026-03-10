@@ -35,10 +35,7 @@ import json
 
 logger = logging.getLogger(__name__)
 
-import os
-# 🎓 TEACHER'S NOTE: Redis is like a super-fast database for temporary data.
-# We're using it to store worker info so it persists across server restarts.
-REDIS_URL = os.getenv("REDIS_URL", "redis://scanner_redis:6379/0")
+from backend.core.config import REDIS_URL
 redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 
 router = APIRouter()

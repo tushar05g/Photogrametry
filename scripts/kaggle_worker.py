@@ -62,6 +62,8 @@ import concurrent.futures
 from pathlib import Path
 from queue import Queue
 from datetime import datetime
+import gc
+import signal
 
 # ─────────────────────────────────────────────────────────
 # � STRUCTURED LOGGING (replaces print)
@@ -79,15 +81,23 @@ logger = logging.getLogger(__name__)
 CACHE_DIR = Path("/kaggle/working/morphic_cache")
 CACHE_DIR.mkdir(exist_ok=True)
 
-def get_file_hash(file_path: str, chunk_size=8192) -> str:
-    """Compute SHA256 hash of a file for cache key generation."""
+def get_file_hash(key: str, chunk_size=8192) -> str:
+    """Compute SHA256 hash of a file or a string key for cache generation."""
     sha256 = hashlib.sha256()
+    
+    # If it's a URL or doesn't exist as a local file, hash the string directly
+    if not os.path.exists(key):
+        sha256.update(key.encode('utf-8'))
+        return sha256.hexdigest()
+        
     try:
-        with open(file_path, 'rb') as f:
+        with open(key, 'rb') as f:
             for chunk in iter(lambda: f.read(chunk_size), b''):
                 sha256.update(chunk)
     except Exception:
-        return None
+        # Fallback to hashing the string if file reading fails
+        sha256.update(key.encode('utf-8'))
+        
     return sha256.hexdigest()
 
 def get_cache_path(prefix: str, file_hash: str) -> Path:
@@ -127,7 +137,7 @@ CLOUD_NAME  = os.getenv("CLOUDINARY_CLOUD_NAME")
 API_KEY     = os.getenv("CLOUDINARY_API_KEY")
 API_SECRET  = os.getenv("CLOUDINARY_API_SECRET")
 
-# 🔄 Redis — for queue management (if needed)
+# 🔄 Redis — (Unused in pull-mode, here for legacy env support)
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 
 # ─────────────────────────────────────────────────────────
@@ -216,34 +226,29 @@ def install_dependencies():
     print("⚙️ Installing Gaussian Splatting stack...")
     os.system("apt-get update -qq && apt-get install -y -qq colmap xvfb libgl1")
 
-    # Step 1: Nuclear Cleanup and Install LEGACY STABLE stack (Python 3.12 Edition)
-    # Target: Support Python 3.12 but avoid NumPy 2.x binary headers.
-    print("🧹 Purging conflicting packages and installing LEGACY STABLE stack for Python 3.12...")
+    # Step 1: Nuclear Cleanup and Install NATIVE 2.X stack
+    # Since Kaggle targets 2.x, we embrace it with the latest 2.x-ready tools.
+    print("🧹 Purging conflicting packages and installing Native NumPy 2.x stack...")
     os.system('pip uninstall -y numpy pillow rembg mediapipe onnxruntime-gpu torchvision')
     
-    # We install exactly these versions to guarantee binary compatibility on Kaggle T4 (Python 3.12).
-    # 2.0.60 is the sweet spot: supports 3.12 but doesn't force NumPy 2.x yet.
+    # We use the 'Goldilocks' combination for Python 3.12:
+    # 1. Latest rembg/mediapipe (2.x ready)
+    # 2. Pillow 10.3.0 (Fixed: torchvision fails on Pillow 11 due to missing _Ink)
     os.system('pip install -q --no-warn-conflicts '
-              '"numpy==1.26.4" '
-              '"Pillow==10.3.0" '
-              '"onnxruntime-gpu==1.17.1" '
-              '"rembg==2.0.60" '
-              '"mediapipe==0.10.11" '
-              '"torchvision==0.18.0" '
-              '"opencv-python-headless" "protobuf<4"')
+              'numpy '
+              'onnxruntime-gpu '
+              'rembg '
+              'mediapipe '
+              'torchvision '
+              '"opencv-python-headless" "protobuf>=4"')
 
     # Step 3: Other requirements
-    os.system("pip install -q cloudinary")
-
-    # Step 4: Mesh tools
-    os.system("pip install -q pymeshlab trimesh")
-
-    # Step 5: Nerfstudio stack
-    os.system("pip install -q nerfstudio gsplat")
-
-    # enforce numpy 1.26.4
-    print("🧪 Ensuring stable numpy 1.26.4 compatibility...")
-    os.system("pip install -q 'numpy==1.26.4' --upgrade")
+    os.system("pip install -q cloudinary pymeshlab trimesh nerfstudio gsplat")
+    
+    # 🏁 FINAL ENFORCEMENT: Fix the Torchvision/Pillow import bug
+    # This MUST be last to ensure no other package upgrades it to 11.x
+    print("🩹 Applying final Pillow 10.3.0 patch for Torchvision stability...")
+    os.system("pip install -q 'Pillow==10.3.0' --upgrade")
 
     # report any remaining dependency conflicts
     print("🔍 Checking for conflicts via 'pip check'...")
@@ -260,13 +265,15 @@ def install_dependencies():
     print("🔬 Verifying binary layout compatibility...")
     try:
         import numpy as np
+        import PIL
         print(f"✅ Runtime NumPy: {np.__version__}")
-        # Run a quick check that would trigger 'dtype size changed'
+        print(f"✅ Runtime Pillow: {PIL.__version__}")
+        # Run a quick check for common binary breakages
         np.array([1]).astype(np.float64)
     except Exception as e:
         print(f"🚨 Binary incompatibility detected: {e}")
-        # Final desperate attempt: force re-link
-        os.system("pip install -q 'numpy==1.26.4' --force-reinstall")
+        print("🔄 Attempting emergency fix...")
+        os.system("pip install -q --upgrade numpy rembg mediapipe")
 
     print("✅ All dependencies installed!")
     check_gpu_availability()
@@ -501,6 +508,8 @@ def _process_single_image(idx, url, input_dir):
                 else:
                     final = img.convert("RGB")
                 final.save(os.path.join(input_dir, f"img_{idx:04d}.jpg"), "JPEG", quality=95)
+                # Ensure memory is released
+                del img, bg, final if 'bg' in locals() else img, final
             return None
         else:
             # � FAIL FAST: Do not fallback to original image.
@@ -748,7 +757,8 @@ def run_nerfstudio(colmap_dir: str, workspace: str) -> str:
         "--output-dir", splat_output_dir
     ]
     
-    result = subprocess.run(train_cmd, capture_output=True, text=True, timeout=3600)
+    xvfb = ["xvfb-run", "-a", "-s", "-screen 0 1024x768x24"]
+    result = subprocess.run(xvfb + train_cmd, capture_output=True, text=True, timeout=3600)
     if result.returncode != 0:
         print(f"   ⚠️ ns-train failed. Showing tail of stderr:")
         print("\n".join(result.stderr.splitlines()[-30:]))
@@ -771,7 +781,8 @@ def run_nerfstudio(colmap_dir: str, workspace: str) -> str:
         "--output-dir", splat_output_dir
     ]
     
-    export_result = subprocess.run(export_cmd, capture_output=True, text=True, timeout=600)
+    xvfb = ["xvfb-run", "-a", "-s", "-screen 0 1024x768x24"]
+    export_result = subprocess.run(xvfb + export_cmd, capture_output=True, text=True, timeout=600)
     if export_result.returncode != 0:
         raise RuntimeError(f"ns-export failed:\\n{export_result.stderr[-500:]}")
         
@@ -1011,6 +1022,13 @@ def process_job(job_id: str, images: list):
                 logger.info(f"Keeping workspace {workspace} for debugging failed job.")
             else:
                 shutil.rmtree(workspace)
+        
+        # 🧪 PASS 6: Explicit Garbage Collection
+        # Frees up RAM from heavy 3D tensors/objects after each job
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
         mark_worker_idle()
 
 
@@ -1033,6 +1051,15 @@ def start_worker():
     install_dependencies()
     check_backend_url()
     register_worker()
+    
+    # 🧪 PASS 7: Graceful Shutdown Handling
+    def handle_exit(sig, frame):
+        logger.info("🛑 Termination signal received. Cleaning up...")
+        mark_worker_idle()
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, handle_exit)
+    signal.signal(signal.SIGTERM, handle_exit)
 
     logger.info("╔" + "═" * 60 + "╗")
     logger.info("║  MORPHIC GPU WORKER v3.0 — REDIS QUEUE EDITION          ║")
@@ -1092,4 +1119,12 @@ def start_worker():
 
 # ─── ENTRY POINT ───
 if __name__ == "__main__":
+    if "ollie-unfashionable" in BACKEND_URL:
+        print("⚠️  WARNING: You are using the DEFAULT BACKEND_URL.")
+        print("💡 Make sure to replace it with your actual Ngrok URL at the top of the script!")
+    
+    if not CLOUD_NAME or "env" in CLOUD_NAME.lower():
+        print("⚠️  WARNING: Cloudinary credentials NOT detected.")
+        print("💡 Remember to set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET.")
+        
     start_worker()

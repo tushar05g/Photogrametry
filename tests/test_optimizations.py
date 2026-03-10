@@ -303,7 +303,7 @@ class TestAsyncUpload:
         try:
             with pytest.raises(Exception) as exc_info:
                 upload_glb_async(temp_file, "test-job-123")
-            assert "after 3 attempts" in str(exc_info.value)
+            assert "after 5 attempts" in str(exc_info.value)
         finally:
             os.unlink(temp_file)
 

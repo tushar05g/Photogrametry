@@ -11,3 +11,4 @@ DATABASE_URL = os.getenv("DATABASE_URL") or "sqlite:///./scanner.db"
 CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME")
 CLOUDINARY_API_KEY = os.getenv("CLOUDINARY_API_KEY")
 CLOUDINARY_API_SECRET = os.getenv("CLOUDINARY_API_SECRET")
+REDIS_URL = os.getenv("REDIS_URL") or "redis://localhost:6379/0"

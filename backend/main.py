@@ -21,10 +21,11 @@ logger = logging.getLogger(__name__)
 
 def validate_environment():
     """Validate required environment variables on startup."""
-    required = ["DATABASE_URL", "CLOUDINARY_CLOUD_NAME", "CLOUDINARY_API_KEY", "CLOUDINARY_API_SECRET"]
-    missing = [var for var in required if not os.getenv(var)]
-    if missing:
-        raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
+    from backend.core.config import DATABASE_URL, CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET, REDIS_URL
+    
+    # Check for missing values in the config module directly
+    if not CLOUDINARY_CLOUD_NAME or not CLOUDINARY_API_KEY or not CLOUDINARY_API_SECRET:
+        raise RuntimeError("Missing required Cloudinary environment variables in .env")
     
     # Validate database connection
     try:
@@ -36,37 +37,35 @@ def validate_environment():
     except Exception as e:
         raise RuntimeError(f"Database connection failed: {e}")
     
+    # Validate Redis connection
+    try:
+        import redis
+        r = redis.from_url(REDIS_URL)
+        r.ping()
+        logger.info("✅ Redis connection validated")
+    except Exception as e:
+        logger.warning(f"⚠️ Redis connection check failed (is it running?): {e}")
+
     logger.info("✅ Environment validation passed")
 
 # Run validation on import
 validate_environment()
 
 # 🎓 TEACHER'S NOTE: This is the "heart" of your 3D scanner app!
-# FastAPI is like Flask but with automatic API docs, type checking, and async support.
-# 
-# WHAT THIS FILE DOES:
-# - Creates the main FastAPI app instance.
-# - Registers all your API routes (endpoints) from scans.py and workers.py.
-# - Serves your frontend HTML/JS files as static files.
-# - Adds security middleware (CORS) so your frontend can talk to the API.
-# 
-# WHY FASTAPI? It's fast, has great docs, and catches bugs before they happen.
+app = FastAPI(title="Morphic 3D Scanner API", version="3.0.0")
 
-app = FastAPI(title="Morphic 3D Scanner API", version="2.0.0")
-
-#🎓 Register all route groups ("routers")
-# Each router is a mini-app responsible for one area of functionality.
+# Register all route groups
 app.include_router(scans.router, prefix="/scans", tags=["Scans"])
 app.include_router(workers.router, prefix="/workers", tags=["Workers"])
 
-# Mount the entire frontend folder so we can serve any future css/js files inside it
+# Mount frontend
 app.mount("/static", StaticFiles(directory="frontend"), name="static")
 
-# 🛡️ CORS Middleware: Required for cross-domain frontends (e.g. hosting on Vercel/Netlify)
+# 🛡️ CORS Middleware
 from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # In production, you should replace "*" with specific domains
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -90,9 +89,10 @@ async def read_index():
 @app.get("/health")
 async def health_check():
     """Health check endpoint for worker verification and system monitoring."""
+    from backend.core.config import REDIS_URL
     import redis
     try:
-        r = redis.Redis(host='scanner_redis', port=6379, db=0)
+        r = redis.from_url(REDIS_URL)
         r.ping()
         redis_ok = True
     except Exception as e:

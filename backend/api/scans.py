@@ -15,10 +15,11 @@ from backend.core.db import SessionLocal, get_db
 
 def validate_cloudinary_url(url: str):
     """🛡️ SSRF PROTECTION: Ensures the URL is actually from our Cloudinary account."""
-    if not url.startswith("https://res.cloudinary.com/dbvidngtc/"):
+    from backend.core.config import CLOUDINARY_CLOUD_NAME
+    if not url.startswith(f"https://res.cloudinary.com/{CLOUDINARY_CLOUD_NAME}/"):
         raise HTTPException(
             status_code=400, 
-            detail=f"Security Alert: Blocked unauthorized image source: {url.split('/')[2] if '/' in url else url}"
+            detail=f"Security Alert: Blocked unauthorized image source"
         )
     return True
 

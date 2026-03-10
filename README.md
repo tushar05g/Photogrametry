@@ -10,7 +10,7 @@ A high-performance, distributed 3D scanning platform using **Gaussian Splatting*
 - **4-10x Processing Speedup**: Implemented parallel image masking using `ThreadPoolExecutor`.
 - **9x Repeat Job Speedup**: Intelligent image and COLMAP result caching.
 - **Fail-Fast Reliability**: Strict 'masking-or-abort' policy to prevent corrupted 3D models.
-- **Legacy Stable Stack**: Custom dependency pins (NumPy 1.26.4 / Python 3.12) to solve binary compatibility on Kaggle.
+- **Native 2.x Stack**: Modern dependency strategy (NumPy 2.x / Python 3.12) with a custom Pillow 10.3.0 patch to solve binary compatibility on Kaggle.
 
 ---
 
@@ -52,8 +52,8 @@ The backend includes an automatic migration runner using Alembic.
 2. Copy the contents of `scripts/kaggle_worker.py` into a cell.
 3. Configure your `BACKEND_URL` (Ngrok) and `WORKER_ID` at the top of the script.
 4. Run the cell. The worker will automatically:
-   - Purge conflicting NumPy 2.x binaries.
-   - Install the **Legacy Stable** stack for Python 3.12 compatibility.
+   - Purge conflicting older packages.
+   - Install the **Native 2.x** stack with the Pillow 10.3.0 patch for full stability.
    - Begin listening for jobs from your Redis queue.
 
 ---

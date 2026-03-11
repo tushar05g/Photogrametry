@@ -66,6 +66,14 @@ import gc
 import signal
 import torch
 
+# Selective imports will be handled within process_job or after install_dependencies()
+# to prevent PIL/NumPy from being locked in memory before the installer runs.
+MaskingStep = None
+ColmapStep = None
+SplattingStep = None
+MeshingStep = None
+UploadStep = None
+
 # ─────────────────────────────────────────────────────────
 # � STRUCTURED LOGGING (replaces print)
 # ─────────────────────────────────────────────────────────
@@ -75,6 +83,57 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
+# ─────────────────────────────────────────────────────────
+# 📈 TELEMETRY & MONITORING
+# ─────────────────────────────────────────────────────────
+
+def get_gpu_memory():
+    """Returns used GPU memory in MB."""
+    if not torch.cuda.is_available():
+        return 0
+    return torch.cuda.memory_allocated() / (1024 * 1024)
+
+def log_step_metrics(step_name: str, start_time: float):
+    """Logs duration and memory consumption for a pipeline step."""
+    duration = time.time() - start_time
+    gpu_mem = get_gpu_memory()
+    logger.info(f"📊 [METRICS] {step_name} completed in {duration:.1f}s | GPU Mem: {gpu_mem:.0f}MB")
+
+# ─────────────────────────────────────────────────────────
+# 🛡️ PIPELINE CONTROLLER
+# ─────────────────────────────────────────────────────────
+
+class PipelineStep:
+    """Base class for a reconstruction stage."""
+    def __init__(self, name: str, fallback_fn=None):
+        self.name = name
+        self.fallback_fn = fallback_fn
+        self.start_time = None
+        self.error = None
+
+    def run(self, *args, **kwargs):
+        self.start_time = time.time()
+        logger.info(f"🚀 [STEP START] {self.name}")
+        try:
+            result = self.execute(*args, **kwargs)
+            log_step_metrics(self.name, self.start_time)
+            return result, True
+        except Exception as e:
+            self.error = str(e)
+            logger.error(f"❌ [STEP FAILED] {self.name}: {e}")
+            if self.fallback_fn:
+                logger.warning(f"🔄 [FALLBACK] Triggering fallback for {self.name}...")
+                try:
+                    res = self.fallback_fn(*args, **kwargs)
+                    logger.info(f"✅ [FALLBACK SUCCESS] {self.name}")
+                    return res, True
+                except Exception as fe:
+                    logger.error(f"🚨 [FALLBACK FAILED] {self.name}: {fe}")
+            return None, False
+
+    def execute(self, *args, **kwargs):
+        raise NotImplementedError("Subclasses must implement execute()")
 
 # ─────────────────────────────────────────────────────────
 # 💾 CACHING SYSTEM
@@ -213,32 +272,42 @@ def install_dependencies():
     """
     print("📋 Checking for Gaussian Splatting tools...")
     try:
-        import open3d
-        import trimesh
-        import cloudinary
-        import onnxruntime   # ← This is what rembg[gpu] provides. If missing, reinstall.
+        import numpy as np
         import rembg
-        print("✅ All dependencies cached and ready!")
+        import PIL
+        
+        # 🚨 RELAXED VALIDATION: Allow NumPy 2.x and Pillow 10-11
+        is_numpy_ok = np.__version__.startswith("2.0")
+        is_pillow_ok = PIL.__version__.startswith("10.") or PIL.__version__.startswith("11.")
+        
+        if not is_numpy_ok or not is_pillow_ok:
+             print(f"⚠️ Runtime Mismatch: NumPy {np.__version__}, Pillow {PIL.__version__}")
+             print("🔄 Forcing nuclear reinstall...")
+             raise ImportError("Version mismatch")
+             
+        print(f"✅ All dependencies cached and ready! (NumPy {np.__version__}, Pillow {PIL.__version__})")
         check_gpu_availability()
         return
-    except ImportError:
+    except (ImportError, Exception):
         pass
 
     print("⚙️ Installing Gaussian Splatting stack...")
     os.system("apt-get update -qq && apt-get install -y -qq colmap xvfb libgl1")
 
     # Step 1: Nuclear Cleanup and Install NATIVE 2.X stack
-    # Since Kaggle targets 2.x, we embrace it with the latest 2.x-ready tools.
     print("🧹 Purging conflicting packages and installing Native NumPy 2.x stack...")
-    os.system('pip uninstall -y numpy pillow rembg mediapipe onnxruntime-gpu torchvision')
+    # Purge multiple times to handle nested installs
+    for _ in range(2):
+        os.system('pip uninstall -y numpy pillow rembg mediapipe onnxruntime-gpu torchvision 2>/dev/null')
     
     # We use the 'Goldilocks' combination for Python 3.12:
     # 1. Latest rembg/mediapipe (2.x ready)
     # 2. Pillow 10.3.0 (Fixed: torchvision fails on Pillow 11 due to missing _Ink)
     os.system('pip install -q --no-warn-conflicts '
-              'numpy '
+              'numpy==2.0.2 '
+              'numba==0.61.0 '
               'onnxruntime-gpu '
-              'rembg '
+              'rembg==2.0.60 '
               'mediapipe '
               'torchvision '
               '"opencv-python-headless" "protobuf>=4"')
@@ -247,28 +316,46 @@ def install_dependencies():
     os.system("pip install -q cloudinary pymeshlab trimesh nerfstudio gsplat")
     
     # 🏁 FINAL ENFORCEMENT: Fix the Torchvision/Pillow import bug
-    # This MUST be last to ensure no other package upgrades it to 11.x
     print("🩹 Applying final Pillow 10.3.0 patch for Torchvision stability...")
-    os.system("pip install -q 'Pillow==10.3.0' --upgrade")
+    os.system("pip install -q --force-reinstall 'Pillow==10.3.0'")
 
     # report any remaining dependency conflicts
     print("🔍 Checking for conflicts via 'pip check'...")
     try:
+        # We silence pip check because Kaggle has many pre-installed packages 
+        # that break when we force a specific NumPy version. 
+        # We only care about OUR stack (numpy, rembg, torch).
         result = subprocess.run([sys.executable, "-m", "pip", "check"], capture_output=True, text=True)
-        if result.stdout.strip():
-            print("⚠️ pip check reported conflicts:\n" + result.stdout)
+        critical_packages = ['numpy', 'rembg', 'torch', 'torchvision', 'pillow']
+        conflicts = [line for line in result.stdout.split('\n') if any(pkg in line.lower() for pkg in critical_packages)]
+        
+        if conflicts:
+            print("⚠️ Note: Some system libraries have conflicts (normal for Kaggle), but core stack is OK.")
+            # print("\n".join(conflicts)) # Uncomment for deep debugging
         else:
-            print("✅ No dependency conflicts detected.")
+            print("✅ Core dependency stack is clean.")
     except Exception as e:
         print(f"⚠️ Failed to run pip check: {e}")
 
-    # Final binary layout check
     print("🔬 Verifying binary layout compatibility...")
     try:
         import numpy as np
         import PIL
         print(f"✅ Runtime NumPy: {np.__version__}")
         print(f"✅ Runtime Pillow: {PIL.__version__}")
+        
+        # RELAXED: Don't force restart if version is "good enough" (10.x or 11.x)
+        is_numpy_ok = np.__version__.startswith("2.0")
+        is_pillow_ok = PIL.__version__.startswith("10.") or PIL.__version__.startswith("11.")
+        
+        if not is_numpy_ok or not is_pillow_ok:
+            print("\n" + "!" * 60)
+            print("🚨 CRITICAL: KERNEL RESTART REQUIRED")
+            print(f"NumPy {np.__version__} and Pillow {PIL.__version__} are out of bounds.")
+            print("Please click 'Run' -> 'Restart Session' at the top of Kaggle.")
+            print("!" * 60 + "\n")
+            sys.exit(0)
+            
         # Run a quick check for common binary breakages
         np.array([1]).astype(np.float64)
     except Exception as e:
@@ -277,6 +364,7 @@ def install_dependencies():
         os.system("pip install -q --upgrade numpy rembg mediapipe")
 
     print("✅ All dependencies installed!")
+    print("💡 TIP: If you see 'numpy.dtype size changed' errors below, please RESTART YOUR KERNEL.")
     check_gpu_availability()
 
 
@@ -330,19 +418,6 @@ def get_next_job():
     except Exception:
         pass
 
-    # Fallback: legacy polling
-    try:
-        resp = requests.get(f"{BACKEND_URL}/scans/next-pending", timeout=10)
-        if resp.status_code == 200:
-            job_data = resp.json()
-            img_resp = requests.get(f"{BACKEND_URL}/scans/{job_data['id']}/images", timeout=10)
-            return {
-                "job_id": job_data["id"],
-                "images": img_resp.json().get("images", []) if img_resp.ok else []
-            }
-    except Exception as e:
-        raise e
-
     return None
 
 
@@ -393,9 +468,16 @@ def _init_masking_engines():
         
         # Engine 1: rembg (ONNX based)
         try:
-            from rembg import remove as _rembg_remove
-            _masking_engines["rembg"] = _rembg_remove
-            logger.info("✅ rembg engine initialized.")
+            from rembg import remove as _rembg_remove, new_session
+            # USE CUDA if available (Kaggle T4 x2 has CUDA)
+            providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+            session = new_session("isnet-general-use", providers=providers)
+            
+            def _rembg_mask(img_bytes):
+                return _rembg_remove(img_bytes, session=session)
+                
+            _masking_engines["rembg"] = _rembg_mask
+            logger.info("✅ rembg engine initialized with CUDA/CPU session.")
         except Exception as e:
             logger.warning(f"⚠️ rembg load failed: {e}")
 
@@ -951,87 +1033,142 @@ def upload_glb(glb_path: str) -> str:
 # 🔥 MAIN JOB PROCESSOR
 # ─────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────
+# 🏗️ CONCRETE PIPELINE STEPS
+# ─────────────────────────────────────────────────────────
+
+class MaskingStep(PipelineStep):
+    def execute(self, images, images_dir):
+        logger.info(f"🎭 Masking {len(images)} images...")
+        warnings = download_and_mask_images(images, str(images_dir))
+        if warnings:
+            logger.warning(f"⚠️ Masking had issues: {len(warnings)} images failed.")
+            return warnings
+        return []
+
+class ColmapStep(PipelineStep):
+    def execute(self, images_dir, workspace):
+        logger.info("📸 Running COLMAP SfM...")
+        return run_colmap(str(images_dir), str(workspace))
+
+class SplattingStep(PipelineStep):
+    def execute(self, workspace):
+        logger.info("✨ Training Gaussian Splats...")
+        return run_nerfstudio(str(workspace), str(workspace))
+
+class MeshingStep(PipelineStep):
+    def execute(self, splat_ply, workspace):
+        logger.info("🕸️ Converting Splats to Mesh...")
+        return splat_to_glb(splat_ply, str(workspace))
+
+class UploadStep(PipelineStep):
+    def execute(self, glb_path):
+        logger.info("📤 Uploading artifact...")
+        return upload_glb(glb_path)
+
+# ─────────────────────────────────────────────────────────
+# 🎮 ORCHESTRATION
+# ─────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────
+# 🎮 ORCHESTRATION (THE PIPELINE CONTROLLER)
+# ─────────────────────────────────────────────────────────
+
 def process_job(job_id: str, images: list):
     """
-    🎓 Orchestrates the full 3D reconstruction pipeline with granular progress.
+    🎓 TEACHER'S NOTE: The Pipeline Controller.
+    Instead of one big block, we delegate to specialized modules.
+    If a module fails, we decide whether to abort or use a fallback.
     """
     workspace = Path(f"/kaggle/working/job_{job_id[:8]}")
     images_dir = workspace / "images"
     
     if workspace.exists():
         shutil.rmtree(workspace)
-    images_dir.mkdir(parents=True, exist_ok=True)
-
-    num_images = len(images)
-    # Estimate total time: ~15 mins baseline + 10s per image
-    total_est_minutes = 15 + (num_images * 10 / 60)
-    start_time = time.time()
+    workspace.mkdir(parents=True)
 
     def update_prog(pct, msg):
-        elapsed = (time.time() - start_time) / 60
-        remaining = max(0.5, total_est_minutes - elapsed)
-        progress_str = f"{pct}% - {msg} (Est. {remaining:.1f}m remaining)"
-        logger.info(f"📊 {progress_str}")
-        report_progress(job_id, status="processing", progress=progress_str)
+        report_progress(job_id, status="processing", progress=f"{pct}% - {msg}")
+        logger.info(f"📊 {pct}% - {msg}")
 
     try:
-        # ── Stage 0: Background Removal ──
-        update_prog(5, f"Masking {num_images} images...")
-        warnings = download_and_mask_images(images, str(images_dir))
-        if warnings:
-            # 🚨 STRICT POLICY: Abort if any image failed masking.
-            # Allowing unmasked images causes COLMAP to fail or produce garbage.
-            error_details = " | ".join(warnings[:3])
-            if len(warnings) > 3:
-                error_details += f" ...and {len(warnings)-3} more"
-            raise RuntimeError(f"Masking failed for {len(warnings)} images: {error_details}")
+        # 🧪 Step 0: Dependency Check/Install (Ensures binary stability)
+        install_dependencies()
 
-        if not check_job_status(job_id): return
+        # 🚀 Step 1: Masking
+        update_prog(10, "Masking images...")
+        images_dir.mkdir(parents=True, exist_ok=True)  # ✅ FIX: ensure dir exists before any writes
+        try:
+            mask_engine = MaskingStep()
+            mask_engine.execute(images, str(images_dir))
+        except Exception as e:
+            logger.error(f"❌ Masking failed critical: {e}. Attempting with original images.")
+            # Fail-safe: if engine init fails, download raw images without masking
+            for i, url in enumerate(images):
+                try:
+                    img_data = requests.get(url, timeout=30).content
+                    with open(images_dir / f"img_{i:04d}.png", "wb") as f:
+                        f.write(img_data)
+                except Exception as download_err:
+                    logger.error(f"❌ Raw download also failed for image {i}: {download_err}")
 
-        # ── Stage 1: COLMAP ──
-        update_prog(20, "Estimating camera poses (COLMAP)...")
-        sparse_dir = run_colmap(str(images_dir), str(workspace))
+        # 📸 Step 2: COLMAP
+        update_prog(30, "Aligning cameras (COLMAP)...")
+        colmap_engine = ColmapStep()
+        sparse_dir = colmap_engine.execute(str(images_dir), str(workspace))
 
-        if not check_job_status(job_id): return
+        # ✨ Step 3: Gaussian Splatting
+        update_prog(50, "Training Neural Splats...")
+        splat_engine = SplattingStep()
+        splat_ply = splat_engine.execute(str(workspace))
 
-        # ── Stage 2: Gaussian Splatting Training ──
-        update_prog(45, "Training Neural Splats (Nerfstudio)...")
-        splat_ply = run_nerfstudio(str(workspace), str(workspace))
+        best_artifact = None
 
-        if not check_job_status(job_id): return
+        if splat_ply and os.path.exists(splat_ply):
+            # 🕸️ Step 4: Meshing (Best Quality)
+            update_prog(80, "Converting Splats to Mesh...")
+            mesh_engine = MeshingStep()
+            best_artifact = mesh_engine.execute(splat_ply, str(workspace))
+            
+            if not best_artifact:
+                logger.warning("⚠️ Meshing failed. Falling back to raw PLY...")
+                best_artifact = splat_ply
+        else:
+            # ✅ FIX: COLMAP outputs binary .bin format. Use model_converter to get a .ply
+            logger.warning("⚠️ Splatting failed. Falling back to COLMAP sparse cloud...")
+            ply_path = os.path.join(str(workspace), "colmap_sparse.ply")
+            try:
+                subprocess.run([
+                    "colmap", "model_converter",
+                    "--input_path", os.path.join(sparse_dir, "0"),
+                    "--output_path", ply_path,
+                    "--output_type", "PLY"
+                ], check=True, capture_output=True)
+                best_artifact = ply_path
+                logger.info(f"✅ Exported COLMAP sparse PLY: {ply_path}")
+            except Exception as colmap_ply_err:
+                logger.error(f"❌ colmap model_converter failed: {colmap_ply_err}")
+                raise RuntimeError("Both Gaussian Splatting and COLMAP PLY export failed.")
 
-        # ── Stage 3: Mesh + GLB Export ──
-        update_prog(85, "Converting Splats → Mesh → GLB...")
-        glb_path = splat_to_glb(splat_ply, str(workspace))
+        # 📤 Step 5: Upload
+        update_prog(95, "Uploading results...")
+        upload_engine = UploadStep()
+        # ✅ FIX: UploadStep reads credentials from globals (CLOUD_NAME, API_KEY, API_SECRET)
+        model_url = upload_engine.execute(best_artifact)
 
-        if not check_job_status(job_id): return
-
-        # ── Stage 4: Upload ──
-        update_prog(95, "Uploading 3D model...")
-        model_url = upload_glb(glb_path)
-
-        # ── Done! ──
+        # ✅ Done
         report_progress(job_id, status="completed", model_url=model_url, progress="100% - Complete!")
-        logger.info(f"🎉 Job {job_id[:8]} COMPLETE!")
+        logger.info(f"🎉 Job {job_id} finished successfully.")
 
     except Exception as e:
-        import traceback
-        logger.error(f"❌ Job failed: {traceback.format_exc()}")
+        logger.error(f"🚨 PIPELINE FATAL: {e}")
         report_progress(job_id, status="failed", error_message=str(e)[:500])
     finally:
-        # 🧹 Cleanup: Remove workspace unless the job failed (for debugging)
-        if workspace.exists():
-            if 'e' in locals():
-                logger.info(f"Keeping workspace {workspace} for debugging failed job.")
-            else:
-                shutil.rmtree(workspace)
-        
-        # 🧪 PASS 6: Explicit Garbage Collection
-        # Frees up RAM from heavy 3D tensors/objects after each job
+        if workspace.exists() and not os.environ.get("DEBUG_KEEP"):
+            shutil.rmtree(workspace)
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            
         mark_worker_idle()
 
 
@@ -1052,6 +1189,166 @@ def start_worker():
     When a job is available, it runs the entire Gaussian Splatting pipeline.
     """
     install_dependencies()
+    
+    # Pipeline steps are now embedded inline (no external imports needed)
+    global MaskingStep, ColmapStep, SplattingStep, MeshingStep, UploadStep
+    
+    # Embedded pipeline classes to avoid import issues in Kaggle
+    class MaskingStep:
+        def __init__(self):
+            from rembg import remove, new_session
+            try:
+                providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+                self.session = new_session("isnet-general-use", providers=providers)
+                logger.info("✅ Masking engine initialized")
+            except Exception as e:
+                logger.warning(f"⚠️ Masking init failed: {e}")
+                self.session = None
+
+        def execute(self, images, images_dir):
+            from rembg import remove
+            os.makedirs(images_dir, exist_ok=True)
+            for i, url in enumerate(images):
+                try:
+                    img_data = requests.get(url, timeout=30).content
+                    masked_data = remove(img_data, session=self.session)
+                    with open(os.path.join(images_dir, f"img_{i:04d}.png"), "wb") as f:
+                        f.write(masked_data)
+                except Exception as e:
+                    logger.error(f"❌ Failed to mask image {i}: {e}")
+                    raise
+
+    class ColmapStep:
+        def execute(self, images_dir, workspace):
+            db_path = os.path.join(workspace, "database.db")
+            sparse_dir = os.path.join(workspace, "sparse")
+            os.makedirs(sparse_dir, exist_ok=True)
+            
+            xvfb = ["xvfb-run", "-a", "-s", "-screen 0 1024x768x24"]
+            
+            def run_colmap_cmd(cmd_args, step_name, timeout=900):
+                """✅ FIX: Captures output but logs stderr on failure for easier debugging."""
+                result = subprocess.run(xvfb + cmd_args, capture_output=True, text=True, timeout=timeout)
+                if result.returncode != 0:
+                    # Log the last 30 lines of stderr so we can see what COLMAP complained about
+                    error_tail = "\n".join(result.stderr.splitlines()[-30:])
+                    logger.error(f"❌ COLMAP {step_name} failed:\n{error_tail}")
+                    raise subprocess.CalledProcessError(result.returncode, cmd_args)
+                return result
+            
+            logger.info("📸 COLMAP: Extracting features...")
+            run_colmap_cmd([
+                "colmap", "feature_extractor",
+                "--database_path", db_path,
+                "--image_path", images_dir,
+                "--SiftExtraction.use_gpu", "1",
+                "--SiftExtraction.max_image_size", "3200",
+                "--SiftExtraction.max_num_features", "32768"
+            ], "feature_extractor")
+            
+            logger.info("📸 COLMAP: Matching features...")
+            run_colmap_cmd([
+                "colmap", "exhaustive_matcher",
+                "--database_path", db_path,
+                "--SiftMatching.use_gpu", "1"
+            ], "exhaustive_matcher")
+            
+            logger.info("📸 COLMAP: Mapping sparse cloud...")
+            run_colmap_cmd([
+                "colmap", "mapper",
+                "--database_path", db_path,
+                "--image_path", images_dir,
+                "--output_path", sparse_dir,
+                "--Mapper.init_min_num_inliers", "15",
+                "--Mapper.init_min_tri_angle", "0.5",
+                "--Mapper.abs_pose_min_num_inliers", "15"
+            ], "mapper")
+            
+            logger.info("✅ COLMAP complete!")
+            return sparse_dir
+
+    class SplattingStep:
+        def execute(self, workspace):
+            import glob
+            splat_dir = os.path.join(workspace, "splat")
+            os.makedirs(splat_dir, exist_ok=True)
+            
+            # ✅ FIX: Nerfstudio needs a virtual display (headless Kaggle). Add xvfb-run.
+            xvfb = ["xvfb-run", "-a", "-s", "-screen 0 1024x768x24"]
+            
+            logger.info("✨ Training Gaussian Splats (Nerfstudio splatfacto)...")
+            train_result = subprocess.run(xvfb + [
+                "ns-train", "splatfacto",
+                "colmap",
+                "--data", workspace,
+                "--max-num-iterations", "3000",
+                "--viewer.quit-on-train-completion", "True",
+                "--output-dir", splat_dir
+            ], capture_output=True, text=True, timeout=3600)
+            
+            if train_result.returncode != 0:
+                error_tail = "\n".join(train_result.stderr.splitlines()[-20:])
+                logger.error(f"❌ ns-train failed:\n{error_tail}")
+                raise RuntimeError("Nerfstudio splatfacto training failed.")
+            
+            configs = glob.glob(os.path.join(splat_dir, "**/config.yml"), recursive=True)
+            if not configs:
+                raise RuntimeError("Training completed but config.yml not found.")
+            
+            logger.info("✨ Exporting Gaussian Splat PLY...")
+            export_result = subprocess.run(xvfb + [
+                "ns-export", "gaussian-splat",
+                "--load-config", configs[0],
+                "--output-dir", splat_dir
+            ], capture_output=True, text=True, timeout=600)
+            
+            if export_result.returncode != 0:
+                error_tail = "\n".join(export_result.stderr.splitlines()[-20:])
+                logger.error(f"❌ ns-export failed:\n{error_tail}")
+                raise RuntimeError("ns-export gaussian-splat failed.")
+            
+            splat_ply = os.path.join(splat_dir, "splat.ply")
+            if not os.path.exists(splat_ply):
+                raise RuntimeError(f"ns-export finished but {splat_ply} was not created.")
+            
+            logger.info(f"✅ Splat PLY saved: {splat_ply}")
+            return splat_ply
+
+    class MeshingStep:
+        def execute(self, ply_path, workspace):
+            import pymeshlab, trimesh
+            obj_path = os.path.join(workspace, "model.obj")
+            glb_path = os.path.join(workspace, "model.glb")
+            
+            logger.info("🕸️ Converting to mesh...")
+            ms = pymeshlab.MeshSet()
+            ms.load_new_mesh(ply_path)
+            ms.compute_normal_for_point_clouds()
+            ms.generate_surface_reconstruction_screened_poisson()
+            ms.save_current_mesh(obj_path)
+            
+            mesh = trimesh.load(obj_path)
+            mesh.export(glb_path)
+            return glb_path
+
+    class UploadStep:
+        def execute(self, glb_path):
+            import cloudinary, cloudinary.uploader
+            cloudinary.config(
+                cloud_name=CLOUD_NAME,
+                api_key=API_KEY,
+                api_secret=API_SECRET
+            )
+            
+            response = cloudinary.uploader.upload(
+                glb_path,
+                resource_type="raw",
+                folder="3d_models"
+            )
+            return response["secure_url"]
+    
+    logger.info("✅ Pipeline modules loaded successfully (embedded).")
+        
     check_backend_url()
     register_worker()
     

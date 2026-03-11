@@ -44,6 +44,12 @@ docker compose up --build
 ```
 The backend includes an automatic migration runner using Alembic.
 
+### 4. Access ngrok Public URL
+Once the services are running, you can find your ngrok public URL and dashboard at:
+- **ngrok Dashboard**: [http://localhost:4040](http://localhost:4040)
+- The public URL will be visible on the dashboard and in the docker logs for the `ngrok` service.
+- Copy this URL and update the `BACKEND_URL` in your `.env` file (and in your Kaggle worker script).
+
 ---
 
 ## 🛰️ Deploying GPU Worker (Kaggle)

@@ -29,14 +29,21 @@ class ColmapStep:
             ], check=True, capture_output=True)
 
             logger.info("📸 Mapping sparse cloud...")
-            subprocess.run(xvfb + [
+            result = subprocess.run(xvfb + [
                 "colmap", "mapper",
                 "--database_path", db,
                 "--image_path", images_dir,
-                "--output_path", sparse
-            ], check=True, capture_output=True)
+                "--output_path", sparse,
+                "--Mapper.init_min_num_inliers", "15",
+                "--Mapper.abs_pose_min_num_inliers", "15",
+                "--Mapper.init_min_tri_angle", "0.5"
+            ], check=False, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                logger.error(f"❌ COLMAP mapper failed. Stderr:\\n{result.stderr[-2000:]}")
+                raise RuntimeError(f"COLMAP mapper failed with code {result.returncode}")
 
             return sparse
-        except subprocess.CalledProcessError as e:
-            logger.error(f"❌ COLMAP failed: {e.stderr.decode()}")
+        except Exception as e:
+            logger.error(f"❌ COLMAP failed: {e}")
             raise RuntimeError(f"COLMAP failed: {e}")

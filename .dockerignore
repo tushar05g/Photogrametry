@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+output/
+logs/
+assets/images*/
+assets/models/
+.git/
+.github/
+.vscode/
+.idea/
+.env

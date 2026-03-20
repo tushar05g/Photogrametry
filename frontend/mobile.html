@@ -1,0 +1,668 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Morphic 3D Scanner - Mobile</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 10px;
+        }
+
+        .container {
+            max-width: 100%;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 20px;
+            padding: 20px 10px;
+        }
+
+        .header h1 {
+            font-size: 1.8rem;
+            margin-bottom: 5px;
+        }
+
+        .header p {
+            font-size: 0.9rem;
+            opacity: 0.9;
+        }
+
+        .upload-section {
+            background: white;
+            border-radius: 15px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+        }
+
+        .upload-section h2 {
+            margin-bottom: 15px;
+            color: #333;
+            font-size: 1.2rem;
+        }
+
+        .drop-zone {
+            border: 3px dashed #667eea;
+            border-radius: 10px;
+            padding: 30px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            background: #f8f9ff;
+            min-height: 150px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .drop-zone:hover {
+            background: #e8ebff;
+            border-color: #5a67d8;
+        }
+
+        .drop-zone.dragover {
+            background: #d4d9ff;
+            border-color: #4c51bf;
+        }
+
+        .drop-zone-icon {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+        }
+
+        .drop-zone-text {
+            color: #666;
+            font-size: 1rem;
+            margin-bottom: 5px;
+        }
+
+        .drop-zone-hint {
+            color: #999;
+            font-size: 0.8rem;
+        }
+
+        .file-input {
+            display: none;
+        }
+
+        .image-preview {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+            gap: 8px;
+            margin-top: 15px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .image-preview-item {
+            position: relative;
+            aspect-ratio: 1;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        }
+
+        .image-preview-item img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .image-preview-item .remove-btn {
+            position: absolute;
+            top: 2px;
+            right: 2px;
+            background: rgba(255, 255, 255, 0.9);
+            border: none;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            transition: all 0.2s;
+        }
+
+        .image-preview-item .remove-btn:hover {
+            background: #ff4444;
+            color: white;
+        }
+
+        .controls {
+            margin-top: 15px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .btn {
+            padding: 15px;
+            border: none;
+            border-radius: 10px;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-weight: 500;
+            width: 100%;
+        }
+
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            background: #5a67d8;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-secondary {
+            background: #e2e8f0;
+            color: #475569;
+        }
+
+        .btn-secondary:hover {
+            background: #cbd5e0;
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .status-section {
+            background: white;
+            border-radius: 15px;
+            padding: 20px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+        }
+
+        .status-section h2 {
+            margin-bottom: 15px;
+            color: #333;
+            font-size: 1.2rem;
+        }
+
+        .status-item {
+            margin-bottom: 15px;
+            padding: 15px;
+            border-radius: 8px;
+            background: #f8f9fa;
+        }
+
+        .status-progress {
+            width: 100%;
+            height: 8px;
+            background: #e2e8f0;
+            border-radius: 4px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
+
+        .status-progress-bar {
+            height: 100%;
+            background: #667eea;
+            transition: width 0.3s ease;
+        }
+
+        .status-message {
+            font-size: 0.9rem;
+            color: #666;
+            margin-top: 5px;
+        }
+
+        .model-viewer {
+            margin-top: 15px;
+            border-radius: 8px;
+            overflow: hidden;
+            background: #f8f9fa;
+            min-height: 250px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .model-viewer iframe {
+            width: 100%;
+            height: 250px;
+            border: none;
+        }
+
+        .loading {
+            text-align: center;
+            color: #666;
+            padding: 20px;
+        }
+
+        .spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 10px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .error {
+            color: #e53e3e;
+            background: #fed7d7;
+            padding: 10px;
+            border-radius: 5px;
+            margin-top: 10px;
+            font-size: 0.9rem;
+        }
+
+        .success {
+            color: #38a169;
+            background: #c6f6d5;
+            padding: 10px;
+            border-radius: 5px;
+            margin-top: 10px;
+            font-size: 0.9rem;
+        }
+
+        .warning {
+            color: #d69e2e;
+            background: #fefcbf;
+            padding: 10px;
+            border-radius: 5px;
+            margin-top: 10px;
+            font-size: 0.9rem;
+        }
+
+        .project-input {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            font-size: 1rem;
+            margin-bottom: 10px;
+        }
+
+        .image-count {
+            background: #667eea;
+            color: white;
+            padding: 5px 10px;
+            border-radius: 15px;
+            font-size: 0.8rem;
+            margin-bottom: 10px;
+            display: inline-block;
+        }
+
+        /* Mobile-specific optimizations */
+        @media (max-width: 480px) {
+            .header h1 {
+                font-size: 1.5rem;
+            }
+            
+            .drop-zone {
+                padding: 20px;
+                min-height: 120px;
+            }
+            
+            .drop-zone-icon {
+                font-size: 2rem;
+            }
+            
+            .image-preview {
+                grid-template-columns: repeat(auto-fill, minmax(60px, 1fr));
+                gap: 5px;
+            }
+        }
+
+        /* Touch-friendly buttons */
+        .btn {
+            min-height: 44px; /* iOS touch target minimum */
+            touch-action: manipulation;
+        }
+
+        /* Camera capture support */
+        .camera-btn {
+            background: #28a745;
+            color: white;
+            margin-bottom: 10px;
+        }
+
+        .camera-btn:hover {
+            background: #218838;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📱 Morphic 3D Scanner</h1>
+            <p>Transform photos into 3D models</p>
+        </div>
+
+        <div class="upload-section">
+            <h2>📸 Upload Images</h2>
+            
+            <div class="image-count" id="imageCount">0 images selected</div>
+            
+            <!-- Camera capture button for mobile -->
+            <button class="btn camera-btn" id="cameraBtn">📷 Take Photo</button>
+            <input type="file" id="cameraInput" class="file-input" accept="image/*" capture="environment" multiple>
+            
+            <div class="drop-zone" id="dropZone">
+                <div class="drop-zone-icon">📤</div>
+                <div class="drop-zone-text">
+                    <strong>Tap to select photos</strong>
+                </div>
+                <div class="drop-zone-hint">
+                    8-20 photos recommended<br>
+                    JPG, PNG supported
+                </div>
+            </div>
+            
+            <input type="file" id="fileInput" class="file-input" multiple accept="image/*">
+            
+            <div class="image-preview" id="imagePreview"></div>
+            
+            <div class="controls">
+                <input type="text" id="projectName" class="project-input" placeholder="Project name (optional)">
+                <button class="btn btn-primary" id="uploadBtn" disabled>🚀 Generate 3D</button>
+                <button class="btn btn-secondary" id="clearBtn">🗑️ Clear All</button>
+            </div>
+            
+            <div id="uploadStatus"></div>
+        </div>
+
+        <div class="status-section">
+            <h2>📊 Processing Status</h2>
+            
+            <div id="jobStatus">
+                <div class="status-item">
+                    <h3>📱 Ready to upload</h3>
+                    <p>Select 8-20 photos from different angles</p>
+                </div>
+            </div>
+            
+            <div id="modelViewer" class="model-viewer" style="display: none;">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <p>Loading 3D model...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let uploadedFiles = [];
+        let currentJobId = null;
+        let statusInterval = null;
+
+        // Get current server URL (auto-detect)
+        const serverUrl = window.location.origin;
+        console.log('Connecting to server:', serverUrl);
+
+        // DOM elements
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+        const cameraInput = document.getElementById('cameraInput');
+        const cameraBtn = document.getElementById('cameraBtn');
+        const imagePreview = document.getElementById('imagePreview');
+        const uploadBtn = document.getElementById('uploadBtn');
+        const clearBtn = document.getElementById('clearBtn');
+        const projectName = document.getElementById('projectName');
+        const uploadStatus = document.getElementById('uploadStatus');
+        const jobStatus = document.getElementById('jobStatus');
+        const modelViewer = document.getElementById('modelViewer');
+        const imageCount = document.getElementById('imageCount');
+
+        // Event listeners
+        dropZone.addEventListener('click', () => fileInput.click());
+        cameraBtn.addEventListener('click', () => cameraInput.click());
+        fileInput.addEventListener('change', handleFileSelect);
+        cameraInput.addEventListener('change', handleFileSelect);
+        uploadBtn.addEventListener('click', uploadImages);
+        clearBtn.addEventListener('click', clearImages);
+
+        // Touch events for mobile
+        dropZone.addEventListener('touchstart', handleTouchStart, {passive: true});
+        dropZone.addEventListener('touchend', handleTouchEnd);
+
+        function handleTouchStart(e) {
+            e.preventDefault();
+            dropZone.classList.add('dragover');
+        }
+
+        function handleTouchEnd(e) {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+        }
+
+        function handleFileSelect(e) {
+            handleFiles(e.target.files);
+        }
+
+        function handleFiles(files) {
+            const imageFiles = Array.from(files).filter(file => file.type.startsWith('image/'));
+            
+            if (imageFiles.length === 0) {
+                showStatus('No valid images found', 'error');
+                return;
+            }
+
+            if (imageFiles.length < 3) {
+                showStatus('Minimum 3 images required', 'error');
+                return;
+            }
+
+            if (imageFiles.length > 50) {
+                showStatus('Maximum 50 images allowed', 'error');
+                return;
+            }
+
+            uploadedFiles = imageFiles;
+            updateImagePreview();
+            updateUploadButton();
+            updateImageCount();
+            showStatus(`${imageFiles.length} images ready`, 'success');
+        }
+
+        function updateImagePreview() {
+            imagePreview.innerHTML = '';
+            
+            uploadedFiles.forEach((file, index) => {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const item = document.createElement('div');
+                    item.className = 'image-preview-item';
+                    item.innerHTML = `
+                        <img src="${e.target.result}" alt="${file.name}">
+                        <button class="remove-btn" onclick="removeImage(${index})">×</button>
+                    `;
+                    imagePreview.appendChild(item);
+                };
+                reader.readAsDataURL(file);
+            });
+        }
+
+        function removeImage(index) {
+            uploadedFiles.splice(index, 1);
+            updateImagePreview();
+            updateUploadButton();
+            updateImageCount();
+            
+            if (uploadedFiles.length === 0) {
+                showStatus('All images removed', 'warning');
+            } else {
+                showStatus(`${uploadedFiles.length} images remaining`, 'success');
+            }
+        }
+
+        function updateUploadButton() {
+            uploadBtn.disabled = uploadedFiles.length < 3;
+        }
+
+        function updateImageCount() {
+            imageCount.textContent = `${uploadedFiles.length} images selected`;
+        }
+
+        function clearImages() {
+            uploadedFiles = [];
+            imagePreview.innerHTML = '';
+            fileInput.value = '';
+            cameraInput.value = '';
+            updateUploadButton();
+            updateImageCount();
+            showStatus('Images cleared', 'warning');
+        }
+
+        async function uploadImages() {
+            if (uploadedFiles.length < 3) {
+                showStatus('Please upload at least 3 images', 'error');
+                return;
+            }
+
+            uploadBtn.disabled = true;
+            showStatus('📤 Uploading images...', 'warning');
+
+            const formData = new FormData();
+            uploadedFiles.forEach(file => {
+                formData.append('files', file);
+            });
+            
+            const projName = projectName.value.trim() || 'Mobile Scan';
+            formData.append('project_name', projName);
+
+            try {
+                const response = await fetch(`${serverUrl}/api/v1/images`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const result = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(result.detail || 'Upload failed');
+                }
+
+                currentJobId = result.job_id;
+                showStatus(`✅ Upload successful! Job ID: ${currentJobId}`, 'success');
+                startStatusPolling();
+
+            } catch (error) {
+                showStatus(`❌ Upload failed: ${error.message}`, 'error');
+                uploadBtn.disabled = false;
+            }
+        }
+
+        function startStatusPolling() {
+            if (statusInterval) {
+                clearInterval(statusInterval);
+            }
+
+            statusInterval = setInterval(async () => {
+                if (!currentJobId) return;
+
+                try {
+                    const response = await fetch(`${serverUrl}/scans/${currentJobId}/progress`);
+                    const status = await response.json();
+
+                    updateJobStatus(status);
+
+                    if (status.status === 'completed') {
+                        clearInterval(statusInterval);
+                        showModel(status.model_url);
+                    } else if (status.status === 'failed') {
+                        clearInterval(statusInterval);
+                        showStatus(`❌ Processing failed: ${status.error_message}`, 'error');
+                        uploadBtn.disabled = false;
+                    }
+
+                } catch (error) {
+                    console.error('Status check failed:', error);
+                }
+            }, 3000); // Longer interval for mobile
+        }
+
+        function updateJobStatus(status) {
+            const statusText = {
+                'pending': '🔄 Queued for processing',
+                'processing': '⚙️ Processing images...',
+                'completed': '✅ Completed',
+                'failed': '❌ Failed'
+            };
+
+            const progress = status.progress || 0;
+            const message = statusText[status.status] || status.status;
+
+            jobStatus.innerHTML = `
+                <div class="status-item">
+                    <h3>Job ${currentJobId}</h3>
+                    <p>${message}</p>
+                    <div class="status-progress">
+                        <div class="status-progress-bar" style="width: ${progress}%"></div>
+                    </div>
+                    <div class="status-message">Progress: ${progress}%</div>
+                    ${status.warnings ? `<div class="warning">${status.warnings}</div>` : ''}
+                    ${status.error_message ? `<div class="error">${status.error_message}</div>` : ''}
+                </div>
+            `;
+        }
+
+        function showModel(modelUrl) {
+            if (modelUrl) {
+                modelViewer.style.display = 'block';
+                modelViewer.innerHTML = `
+                    <iframe src="${modelUrl}" title="3D Model Viewer"></iframe>
+                `;
+                showStatus('🎉 3D model ready! View below.', 'success');
+            }
+        }
+
+        function showStatus(message, type = 'info') {
+            uploadStatus.innerHTML = `<div class="${type}">${message}</div>`;
+            
+            // Auto-hide success messages after 5 seconds
+            if (type === 'success') {
+                setTimeout(() => {
+                    if (uploadStatus.innerHTML.includes(message)) {
+                        uploadStatus.innerHTML = '';
+                    }
+                }, 5000);
+            }
+        }
+
+        // Initialize
+        updateUploadButton();
+        updateImageCount();
+
+        // Check server connection
+        fetch(`${serverUrl}/health`)
+            .then(response => response.json())
+            .then(data => {
+                console.log('Server connected:', data);
+            })
+            .catch(error => {
+                console.error('Server connection failed:', error);
+                showStatus('⚠️ Server connection issue. Check if backend is running.', 'warning');
+            });
+    </script>
+</body>
+</html>

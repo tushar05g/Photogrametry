@@ -1,59 +1,62 @@
+"""
+Masking Step - Image download with quality validation
+"""
+
 import os
 import requests
-import io
 import logging
+from PIL import Image
+import io
 
-logger = logging.getLogger("worker")
+logger = logging.getLogger(__name__)
 
 class MaskingStep:
-    def __init__(self):
-        self.session = None
-        self._init_session()
-
-    def _init_session(self):
-        try:
-            # Lazy import: PIL/rembg loaded AFTER install_dependencies() runs
-            from rembg import new_session
-            providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
-            self.session = new_session("isnet-general-use", providers=providers)
-            logger.info("✅ Masking engine initialized with GPU/CPU session.")
-        except Exception as e:
-            logger.warning(f"⚠️ GPU Masking init failed: {e}. Falling back to CPU.")
-            self.session = None
-
     def execute(self, images, output_folder):
-        # Lazy imports inside execute() to avoid locking library versions
-        from rembg import remove
-        from PIL import Image
-
+        """Download and validate images."""
         os.makedirs(output_folder, exist_ok=True)
-        success_count = 0
+        
+        valid_images = []
         
         for i, url in enumerate(images):
-            img_bytes = b""
             try:
-                img_bytes = requests.get(url, timeout=30).content
-                # Use rembg with persistent session
-                masked_bytes = remove(img_bytes, session=self.session)
+                img_data = requests.get(url, timeout=30).content
+                path = os.path.join(output_folder, f"img_{i:04d}.jpg")
                 
-                path = os.path.join(output_folder, f"img_{i:04d}.png")
-                with open(path, "wb") as f:
-                    f.write(masked_bytes)
-                success_count += 1
-            except Exception as e:
-                logger.error(f"❌ Failed image {i}: {e}")
-                # FALLBACK: If masking fails, save the original image to keep pipeline alive
+                # Validate image quality
                 try:
-                    if img_bytes:
-                        with open(os.path.join(output_folder, f"img_{i:04d}.png"), "wb") as f:
-                            f.write(img_bytes)
-                        logger.warning(f"⚠️ Falling back to raw image for index {i}")
-                        success_count += 1
-                except Exception as fe:
-                    logger.error(f"❌ Even fallback failed for image {i}: {fe}")
-
-        if success_count == 0:
-            raise RuntimeError("All masking attempts failed — no images could be processed.")
+                    img = Image.open(io.BytesIO(img_data))
+                    width, height = img.size
+                    
+                    # Minimum resolution check
+                    if width < 640 or height < 480:
+                        logger.warning(f"Image {i+1} is too small: {width}x{height}")
+                        continue
+                    
+                    # Aspect ratio check
+                    aspect = width / height
+                    if aspect < 0.5 or aspect > 2.0:
+                        logger.warning(f"Image {i+1} has extreme aspect ratio: {aspect:.2f}")
+                        continue
+                    
+                    # Save valid image
+                    with open(path, "wb") as f:
+                        f.write(img_data)
+                    valid_images.append(path)
+                    logger.info(f"Downloaded valid image {i+1}/{len(images)} ({width}x{height})")
+                    
+                except Exception as e:
+                    logger.warning(f"Invalid image {i+1}: {e}")
+                    continue
+                    
+            except Exception as e:
+                logger.error(f"Failed to download image {i+1}: {e}")
+                continue
         
-        logger.info(f"✅ Masking done: {success_count}/{len(images)} images processed.")
+        if len(valid_images) < 8:
+            logger.warning(f"Only {len(valid_images)} valid images. For best results, use 20+ photos from different angles.")
+        
+        if len(valid_images) < 3:
+            raise RuntimeError(f"Too few valid images ({len(valid_images)}). Need at least 3 good photos.")
+        
+        logger.info(f"Successfully downloaded {len(valid_images)} valid images")
         return output_folder

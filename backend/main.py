@@ -1,7 +1,13 @@
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from backend.api import scans, workers
+import sys
+import os
+
+# 🎓 Add project root to sys.path at the front to resolve 'core' without being shadowed by backend/core
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from backend.api import scans, upload
 import os
 import logging
 from datetime import datetime
@@ -27,15 +33,25 @@ def validate_environment():
     if not CLOUDINARY_CLOUD_NAME or not CLOUDINARY_API_KEY or not CLOUDINARY_API_SECRET:
         raise RuntimeError("Missing required Cloudinary environment variables in .env")
     
-    # Validate database connection
-    try:
-        from backend.core.db import get_db
-        db = next(get_db())
-        from sqlalchemy import text
-        db.execute(text("SELECT 1"))
-        logger.info("✅ Database connection validated")
-    except Exception as e:
-        raise RuntimeError(f"Database connection failed: {e}")
+    # Validate database connection with retries
+    max_retries = 3
+    retry_delay = 2
+    for attempt in range(max_retries):
+        try:
+            from backend.core.db import get_db
+            db = next(get_db())
+            from sqlalchemy import text
+            db.execute(text("SELECT 1"))
+            logger.info("✅ Database connection validated")
+            break
+        except Exception as e:
+            if attempt < max_retries - 1:
+                logger.warning(f"⚠️ Database connection attempt {attempt + 1} failed: {e}. Retrying in {retry_delay}s...")
+                import time
+                time.sleep(retry_delay)
+            else:
+                logger.error(f"❌ Database connection failed after {max_retries} attempts: {e}")
+                raise RuntimeError(f"Database connection failed: {e}")
     
     # Validate Redis connection
     try:
@@ -56,10 +72,14 @@ app = FastAPI(title="Morphic 3D Scanner API", version="3.0.0")
 
 # Register all route groups
 app.include_router(scans.router, prefix="/scans", tags=["Scans"])
-app.include_router(workers.router, prefix="/workers", tags=["Workers"])
+app.include_router(upload.router, prefix="/api/v1", tags=["API v1"])  # New upload endpoints
 
-# Mount frontend
+# Mount frontend and output directory
+app.mount("/frontend", StaticFiles(directory="frontend"), name="frontend")
 app.mount("/static", StaticFiles(directory="frontend"), name="static")
+# Create output dir if it doesn't exist to avoid mount errors during dev
+os.makedirs("output", exist_ok=True)
+app.mount("/static/output", StaticFiles(directory="output"), name="output")
 
 # 🛡️ CORS Middleware
 from fastapi.middleware.cors import CORSMiddleware
@@ -125,3 +145,26 @@ async def get_job_progress(job_id: str):
         "created_at": job.created_at.isoformat() if job.created_at else None,
         "updated_at": job.updated_at.isoformat() if job.updated_at else None
     }
+
+# --- ALIASES FOR NEW CPU FLOW ---
+@app.post("/generate-3d")
+async def generate_3d_alias(payload: scans.schemas.ScanCreateRequest):
+    """Alias for scan job creation from URLs."""
+    from backend.core.db import SessionLocal
+    db = SessionLocal()
+    try:
+        # We need to handle the background_tasks or pass it
+        from fastapi import BackgroundTasks
+        bt = BackgroundTasks()
+        return scans.create_job_from_urls(payload, bt, db)
+    finally:
+        db.close()
+
+@app.get("/status/{job_id}")
+async def get_status_alias(job_id: str):
+    """Alias for the progress endpoint."""
+    return await get_job_progress(job_id)
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("backend.main:app", host="0.0.0.0", port=8000, reload=True)

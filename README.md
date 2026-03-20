@@ -1,88 +1,389 @@
-# 🛰️ Morphic 3D Scanner (v3.0)
+# 🎲 Morphic 3D Scanner
 
-A high-performance, distributed 3D scanning platform using **Gaussian Splatting** (Nerfstudio/splatfacto) for photorealistic 3D reconstruction. This version (v3.0) is optimized for speed, reliability, and production-grade stability on Kaggle GPU environments.
+A high-performance, distributed 3D scanning platform using photogrammetry and advanced computer vision techniques.
 
----
+## 🎯 Overview
 
-## 🚀 Key Features (v3.0 Optimizations)
+Morphic transforms multiple 2D images into accurate 3D models using a sophisticated CPU-based photogrammetry pipeline. The system features a modern web interface, robust backend API, and scalable worker architecture.
 
-- **100x Faster Polling**: Switched from HTTP polling to a high-speed **Redis Queue** system.
-- **4-10x Processing Speedup**: Implemented parallel image masking using `ThreadPoolExecutor`.
-- **9x Repeat Job Speedup**: Intelligent image and COLMAP result caching.
-- **Fail-Fast Reliability**: Strict 'masking-or-abort' policy to prevent corrupted 3D models.
-- **Native 2.x Stack**: Modern dependency strategy (NumPy 2.x / Python 3.12) with a custom Pillow 10.3.0 patch to solve binary compatibility on Kaggle.
+### ✨ Key Features
 
----
+- **🔄 Dynamic Processing**: Upload images → Generate 3D models → No file proliferation
+- **🎯 Web Interface**: Modern drag-and-drop upload with real-time progress
+- **⚡ CPU Photogrammetry**: Advanced SfM and MVS pipeline without GPU requirements
+- **🏗️ Scalable Architecture**: Redis queue system with background workers
+- **📊 Real-time Tracking**: Live job status and progress updates
+- **🛡️ Robust Validation**: Image quality checks and error recovery
+- **🎨 3D Viewer**: Interactive model display with multiple viewing modes
 
 ## 🏗️ Architecture
 
-- **Backend (FastAPI)**: Manages jobs, workers, and results. Uses SQLAlchemy with connection pooling and Redis for the job queue.
-- **Worker (Kaggle/GPU)**: Distributed Python workers that perform the heavy lifting (COLMAP + Nerfstudio).
-- **Frontend (Three.js)**: Modern web viewer for interactive 3D model visualization.
-- **Storage (Cloudinary)**: Secure, scalable hosting for generated `.ply` and `.glb` models.
+```
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   Frontend      │    │    Backend      │    │   CPU Worker    │
+│   (HTML/JS)     │◄──►│   (FastAPI)     │◄──►│  (Photogrammetry)│
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+         │                       │                       │
+         │                       ▼                       ▼
+         │                ┌─────────────┐        ┌─────────────┐
+         │                │   Redis     │        │  PostgreSQL │
+         │                │   Queue     │        │   Database  │
+         │                └─────────────┘        └─────────────┘
+         │                       │
+         ▼                       ▼
+┌─────────────────┐    ┌─────────────────┐
+│   User Images   │    │   3D Models     │
+│   (Upload)      │    │   (Output)      │
+└─────────────────┘    └─────────────────┘
+```
 
----
+## 📁 Project Structure
 
-## 🛠️ Quick Start (Local Setup)
+```
+morphic-3d-scanner/
+├── 📁 backend/                    # FastAPI backend
+│   ├── api/
+│   │   ├── scans.py              # Scan management endpoints
+│   │   ├── upload.py             # Direct image upload
+│   │   └── models.py             # Model download/view
+│   ├── core/                      # Configuration & database
+│   ├── models/                    # SQLAlchemy models
+│   ├── services/                  # Business logic
+│   └── main.py                    # FastAPI application
+├── 📁 frontend/                   # Web frontend
+│   ├── index.html                 # Main application UI
+│   ├── js/                        # JavaScript modules
+│   ├── css/                       # Stylesheets
+│   ├── viewer/                    # 3D viewer components
+│   └── assets/                    # Static assets
+├── 📁 core/                       # Shared core functionality
+│   ├── photogrammetry/            # 3D reconstruction pipeline
+│   │   ├── pipeline.py            # Main pipeline class
+│   │   ├── validation.py          # Image validation
+│   │   └── meshing.py             # Mesh generation
+│   ├── workers/                   # Background workers
+│   │   ├── cpu_worker.py          # CPU photogrammetry worker
+│   │   └── base_worker.py         # Base worker class
+│   └── utils/                     # Utility modules
+│       ├── logger.py              # Logging utilities
+│       ├── file_utils.py          # File operations
+│       └── api_utils.py           # API utilities
+├── 📁 scripts/                    # Utility scripts
+│   └── start.py                   # System startup script
+├── 📁 assets/                     # Static assets
+│   └── sample_images/             # Sample datasets
+│       └── cube/                  # Cube images (20 files)
+├── 📁 output/                     # Generated 3D models
+├── 📄 requirements.txt             # Python dependencies
+├── 📄 .env.example                # Environment template
+├── 📄 .gitignore                  # Git ignore rules
+└── 📄 README.md                   # This file
+```
 
-### 1. Prerequisites
-- Docker & Docker Compose
-- Python 3.11+
-- Cloudinary Account (for 3D hosting)
-- Ngrok (for local development tunnel)
+## � Quick Start
 
-### 2. Configure Environment
-Create a `.env` file from the example:
+### Method 1: One-Command Startup
+
 ```bash
+python scripts/start.py
+```
+
+This starts:
+- ✅ Redis server
+- ✅ FastAPI backend
+- ✅ CPU worker
+- ✅ Auto-restart on failures
+
+### Method 2: Manual Startup
+
+1. **Start Redis:**
+```bash
+redis-server
+```
+
+2. **Start Backend:**
+```bash
+source .venv/bin/activate
+cd backend
+python main.py
+```
+
+3. **Start Worker:**
+```bash
+source .venv/bin/activate
+python core/workers/cpu_worker.py
+```
+
+## 🌐 Access Points
+
+### Frontend Interface
+- **Main UI**: `frontend/index.html`
+- **Features**: Drag & drop upload, real-time status, 3D model viewer
+
+### Backend API
+- **Base URL**: `http://localhost:8000`
+- **API Docs**: `http://localhost:8000/docs`
+- **Health Check**: `http://localhost:8000/health`
+
+## � API Endpoints
+
+### Upload Images Directly
+```bash
+curl -X POST http://localhost:8000/api/v1/images \
+  -F "files=@image1.jpg" \
+  -F "files=@image2.jpg" \
+  -F "files=@image3.jpg" \
+  -F "project_name=My Object"
+```
+
+### Check Job Status
+```bash
+curl http://localhost:8000/scans/{job_id}/progress
+```
+
+### Download 3D Model
+```bash
+curl http://localhost:8000/api/v1/job/{job_id}/download
+```
+
+## 🔄 Processing Workflow
+
+### 1. Image Upload
+- **Validation**: File type, size, quantity checks
+- **Quality Assessment**: Blur detection, resolution validation
+- **Storage**: Temporary local processing
+
+### 2. Job Creation
+- **Database**: Creates job record with metadata
+- **Queue**: Adds job to Redis queue for processing
+- **Tracking**: Returns job ID for status monitoring
+
+### 3. 3D Reconstruction
+- **Feature Extraction**: SIFT keypoint detection
+- **Feature Matching**: Pairwise image matching
+- **SfM**: Structure from Motion camera pose estimation
+- **MVS**: Multi-View Stereo dense reconstruction
+- **Meshing**: Surface reconstruction and optimization
+
+### 4. Model Delivery
+- **Storage**: Model saved to `/output/` directory
+- **Database**: Job updated with model URL
+- **Frontend**: Real-time status updates + model display
+
+## 📊 Frontend Features
+
+### Upload Interface
+- 🎯 **Drag & Drop**: Intuitive file upload
+- 📸 **Image Preview**: Thumbnail grid with remove option
+- 📝 **Project Naming**: Custom project names
+- ⚡ **Real-time Validation**: Immediate feedback
+
+### Status Tracking
+- 📊 **Progress Bar**: Visual processing status
+- 🔄 **Live Updates**: Auto-refresh every 2 seconds
+- ⚠️ **Error Handling**: Clear error messages
+- ✅ **Success Notifications**: Completion alerts
+
+### 3D Model Viewer
+- 🎲 **Interactive Display**: Rotate, zoom, pan
+- 📐 **Multiple Views**: Wireframe, solid, rainbow modes
+- 🎮 **Controls**: Adjustable rotation speed
+- 📱 **Responsive**: Works on all devices
+
+## � Configuration
+
+### Environment Variables
+```bash
+# Database
+DATABASE_URL=postgresql://user:pass@localhost/morphic
+
+# Redis
+REDIS_URL=redis://localhost:6379
+
+# Backend Settings
+BACKEND_HOST=127.0.0.1
+BACKEND_PORT=8000
+```
+
+### Processing Requirements
+- **Min Images**: 3 (for basic reconstruction)
+- **Max Images**: 50 (to prevent overload)
+- **File Size**: 10MB per image
+- **Formats**: JPG, PNG, WebP
+- **Recommended**: 8-20 images for best results
+
+## 🛠️ Development
+
+### Setup Development Environment
+```bash
+# Clone repository
+git clone https://github.com/your-username/morphic-3d-scanner.git
+cd morphic-3d-scanner
+
+# Create virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Set up environment
 cp .env.example .env
-```
-Update with your credentials (Cloudinary, Database, Ngrok URL).
+# Edit .env with your configuration
 
-### 3. Launch Services
+# Start development server
+python scripts/start.py
+```
+
+### Project Structure Guidelines
+
+#### Core Modules (`core/`)
+- **photogrammetry/**: 3D reconstruction logic
+- **workers/**: Background job processors
+- **utils/**: Shared utility functions
+
+#### Backend (`backend/`)
+- **api/**: REST API endpoints
+- **models/**: Database models
+- **services/**: Business logic
+
+#### Frontend (`frontend/`)
+- **js/**: Modular JavaScript components
+- **css/**: Stylesheets
+- **viewer/**: 3D visualization components
+
+### Adding New Features
+
+1. **New Processing Pipeline**: Add to `core/photogrammetry/`
+2. **New API Endpoints**: Add to `backend/api/`
+3. **New Worker Types**: Add to `core/workers/`
+4. **Frontend Components**: Add to `frontend/js/`
+
+## 📊 Performance
+
+### Processing Time
+- **Small objects** (3-8 images): 1-3 minutes
+- **Medium objects** (8-20 images): 3-8 minutes
+- **Large objects** (20-50 images): 8-15 minutes
+
+### System Requirements
+- **CPU**: 4+ cores recommended
+- **RAM**: 8GB+ recommended
+- **Storage**: 1GB+ free space
+- **Network**: Stable internet for API communication
+
+## 🔍 Monitoring
+
+### Health Checks
 ```bash
-docker compose up --build
+# Backend health
+curl http://localhost:8000/health
+
+# Redis status
+redis-cli ping
+
+# Worker logs
+tail -f logs/worker.log
 ```
-The backend includes an automatic migration runner using Alembic.
 
-### 4. Access ngrok Public URL
-Once the services are running, you can find your ngrok public URL and dashboard at:
-- **ngrok Dashboard**: [http://localhost:4040](http://localhost:4040)
-- The public URL will be visible on the dashboard and in the docker logs for the `ngrok` service.
-- Copy this URL and update the `BACKEND_URL` in your `.env` file (and in your Kaggle worker script).
+### Database Queries
+```sql
+-- Active jobs
+SELECT * FROM scan_jobs WHERE status IN ('pending', 'processing');
 
----
+-- Job history
+SELECT * FROM scan_jobs ORDER BY created_at DESC LIMIT 10;
 
-## 🛰️ Deploying GPU Worker (Kaggle)
+-- Processing statistics
+SELECT status, COUNT(*) FROM scan_jobs GROUP BY status;
+```
 
-1. Create a new **Kaggle Notebook** with GPU T4 x2 enabled.
-2. Copy the contents of `scripts/kaggle_worker.py` into a cell.
-3. Configure your `BACKEND_URL` (Ngrok) and `WORKER_ID` at the top of the script.
-4. Run the cell. The worker will automatically:
-   - Purge conflicting older packages.
-   - Install the **Native 2.x** stack with the Pillow 10.3.0 patch for full stability.
-   - Begin listening for jobs from your Redis queue.
+## 🚨 Troubleshooting
 
----
+### Common Issues
 
-## 🧪 Testing and Quality
-
-- **Unit Tests**: Full suite for queue, cache, and DB pooling in `tests/test_optimizations.py`.
-- **Health Checks**: Monitor system status at `GET /health`.
-- **Logs**: Backend logs are stored in `logs/backend.log`.
-
----
-
-## 📜 Development & Contributions
-
+**Redis Connection Failed**
 ```bash
-# Install in development mode
-pip install -e .
+# Install Redis
+sudo apt-get install redis-server
 
-# Run the test suite
-pytest tests/test_optimizations.py
+# Start Redis
+redis-server
 
-# Style guide
-flake8 backend/ scripts/
+# Check status
+redis-cli ping
 ```
 
-Developed with ❤️ for the 3D scanning community.
+**Backend Not Responding**
+```bash
+# Check logs
+cd backend && python main.py
+
+# Verify port
+netstat -tulpn | grep :8000
+```
+
+**Worker Crashes**
+```bash
+# Check worker logs
+tail -f logs/worker.log
+
+# Restart worker
+python core/workers/cpu_worker.py
+```
+
+**3D Model Generation Failed**
+- Use 8-20 images per object
+- Ensure 60-80% overlap between images
+- Good lighting and contrast
+- Object fills 50-70% of frame
+- Multiple angles (top, bottom, sides)
+
+## 🎯 Best Practices
+
+### For Users
+- Upload 8-20 high-quality images
+- Ensure good lighting and focus
+- Capture multiple angles
+- Avoid motion blur
+- Use consistent background
+
+### For Developers
+- Monitor system resources
+- Implement error handling
+- Use progress indicators
+- Validate inputs thoroughly
+- Handle concurrent requests
+
+### For Operations
+- Monitor Redis queue length
+- Set up log rotation
+- Implement backup strategies
+- Monitor database performance
+- Set up alerts for failures
+
+## 🤝 Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests
+5. Submit a pull request
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🙏 Acknowledgments
+
+- [COLMAP](https://github.com/colmap/colmap) - Structure from Motion
+- [Open3D](http://www.open3d.org/) - 3D data processing
+- [Three.js](https://threejs.org/) - 3D web graphics
+- [FastAPI](https://fastapi.tiangolo.com/) - Web framework
+- [Redis](https://redis.io/) - Queue management
+
+---
+
+**🎲 Transform your images into 3D models with Morphic!**
+
+Built with ❤️ by the Morphic team

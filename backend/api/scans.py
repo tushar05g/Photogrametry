@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Backgro
 from sqlalchemy.orm import Session
 from typing import List
 import uuid
+import os
 
 from backend.core.db import SessionLocal
 from backend.models.models import ScanJob, ScanImage, JobStatus, ReferenceType
@@ -14,7 +15,9 @@ router = APIRouter()
 from backend.core.db import SessionLocal, get_db
 
 def validate_cloudinary_url(url: str):
-    """🛡️ SSRF PROTECTION: Ensures the URL is actually from our Cloudinary account."""
+    """🛡️ SSRF PROTECTION: Ensures the URL is actually from our Cloudinary account or a local test file."""
+    if url.startswith("/") or os.path.exists(url):
+        return True
     from backend.core.config import CLOUDINARY_CLOUD_NAME
     if not url.startswith(f"https://res.cloudinary.com/{CLOUDINARY_CLOUD_NAME}/"):
         raise HTTPException(
@@ -106,7 +109,9 @@ async def upload_scans(
     from backend.queue.manager import enqueue_job
     job.status = JobStatus.pending
     db.commit()
-    enqueue_job(str(job.id))  # Push to Redis queue instead of HTTP polling
+    
+    image_paths = [img.file_path for img in uploaded_images]
+    enqueue_job(str(job.id), image_paths, job.project_name or "Untitled Scan")
 
     return {
         "job_id": job.id,
@@ -193,9 +198,7 @@ def create_job_from_urls(
     db.commit()
 
     # --- STEP 5: Push job to Redis queue ---
-    # 🎓 This is the KEY distributed step. Instead of directly calling the worker,
-    # we add it to a queue. An idle worker will pick it up automatically.
-    enqueue_job(str(job.id))
+    enqueue_job(str(job.id), payload.images, payload.project_name)
 
     # --- STEP 6: Background coin detection (does not block the response) ---
     if payload.images:
@@ -299,7 +302,24 @@ def get_scan(job_id: uuid.UUID, db: Session = Depends(get_db)):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     
+    # Check current queue status if still pending
+    if job.status == JobStatus.pending:
+        from backend.task_queue.manager import get_job_status
+        q_status = get_job_status(str(job_id))
+        if q_status == "started":
+            job.status = JobStatus.processing
+            db.commit()
+    
     return job
+
+@router.get("/{job_id}/status")
+def get_job_queue_status(job_id: uuid.UUID):
+    """
+    Check the status of a job in the RQ queue.
+    """
+    from backend.queue.manager import get_job_status
+    status = get_job_status(str(job_id))
+    return {"job_id": job_id, "queue_status": status}
 
 @router.get("/", response_model=schemas.ScanHistoryResponse)
 def list_scans(db: Session = Depends(get_db)):

@@ -29,15 +29,23 @@ MIN_HEIGHT = 650
 BLUR_THRESHOLD = 10.0  # Below this = blurry. Higher = stricter.
 
 
-def _load_image_from_url(url: str) -> np.ndarray:
+def _load_image(url_or_path: str) -> np.ndarray:
     """
-    🎓 Downloads an image from a URL and converts it to a numpy array for OpenCV.
-    Numpy array is the universal format for image processing libraries.
+    🎓 Loads an image from a URL or a local file path and converts it to a numpy array for OpenCV.
     """
-    response = requests.get(url, timeout=15)
-    response.raise_for_status()
-    img_array = np.frombuffer(response.content, np.uint8)
-    img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+    import os
+    if url_or_path.startswith(("http://", "https://")):
+        response = requests.get(url_or_path, timeout=15)
+        response.raise_for_status()
+        img_array = np.frombuffer(response.content, np.uint8)
+        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+    elif os.path.exists(url_or_path):
+        img = cv2.imread(url_or_path)
+    else:
+        raise FileNotFoundError(f"Image source not found: {url_or_path}")
+    
+    if img is None:
+        raise ValueError(f"Failed to decode image from: {url_or_path}")
     return img
 
 
@@ -163,7 +171,7 @@ def validate_dataset(image_urls: list[str]) -> dict:
     images_with_arrays = []
     for url in image_urls:
         try:
-            img = _load_image_from_url(url)
+            img = _load_image(url)
             images_with_arrays.append((url, img))
         except Exception as e:
             errors.append(f"Could not download image {url.split('/')[-1]}: {e}")

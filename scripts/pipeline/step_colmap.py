@@ -15,7 +15,8 @@ class ColmapStep:
         sparse_dir = os.path.join(workspace, "sparse")
         os.makedirs(sparse_dir, exist_ok=True)
         
-        xvfb = ["xvfb-run", "-a"]
+        import shutil
+        xvfb = ["xvfb-run", "-a"] if shutil.which("xvfb-run") else []
         
         try:
             logger.info("Extracting features (Memory Optimized)...")
@@ -58,7 +59,8 @@ class ColmapStep:
             # Check if mapper succeeded
             if result.returncode != 0:
                 logger.warning(f"COLMAP mapper failed with code {result.returncode}")
-                logger.warning(f"Error output: {result.stderr[-500:] if result.stderr else 'None'}")
+                logger.warning(f"Error output: {result.stderr}")
+                logger.warning(f"Standard output: {result.stdout}")
                 
                 # Try with even more relaxed parameters
                 logger.info("Retrying with relaxed parameters...")

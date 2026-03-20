@@ -1,30 +1,114 @@
-# Python
+# Virtual Environment
 .venv/
+venv/
+env/
+
+# Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
-.pytest_cache/
-.coverage
-htmlcov/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
 
-# Environment and Secrets
+# Virtual environments
 .env
-.env.local
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
 
-# Project Specific
-logs/*.log
-morphic_cache/
-job_*/
-splat_output/
-*.ply
-*.glb
-*.obj
-colmap_db.db
-sparse/
-
-# OS
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 .DS_Store
-Thumbs.db
 
-*.zip
+# Logs
+*.log
+logs/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Node.js (for frontend)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# Environments
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+tmp/
+
+# OS generated files
+Thumbs.db
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Desktop.ini
+
+# 3D models and outputs
+*.obj
+*.ply
+*.stl
+*.glb
+*.gltf
+output/
+models/
+reconstructions/
+
+# COLMAP outputs
+colmap/
+sparse/
+dense/
+
+# Cache and runtime
+.cache/
+cache/
+.pytest_cache/
+
+# Redis dump
+dump.rdb
+
+# Backup files
+*.bak
+*.backupp

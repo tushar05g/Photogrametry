@@ -1,4 +1,4 @@
-#!/home/harpreet/Documents/3d_scanner/.venv/bin/python
+#!/home/harpreet/Documents/3d_scanner/.venv/bin/python3
 # -*- coding: utf-8 -*-
 import re
 import sys

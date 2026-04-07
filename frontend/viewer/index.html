@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Scanner Viewer | Morphic</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #6366f1;
+            --accent: #818cf8;
+            --bg: #0f172a;
+            --surface: rgba(30, 41, 59, 0.7);
+            --text: #f8fafc;
+            --text-dim: #94a3b8;
+            --success: #22c55e;
+            --error: #ef4444;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Outfit', sans-serif;
+        }
+
+        body {
+            background-color: var(--bg);
+            color: var(--text);
+            overflow: hidden;
+        }
+
+        #view-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            z-index: 0;
+        }
+
+        #overlay {
+            position: relative;
+            z-index: 10;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            padding: 2.5rem;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+
+        #header h1 {
+            font-weight: 600;
+            letter-spacing: -0.05em;
+            background: linear-gradient(135deg, var(--primary), var(--accent));
+            background-clip: text;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            font-size: 2rem;
+            margin-bottom: 0.5rem;
+        }
+
+        #header p {
+            color: var(--text-dim);
+            font-size: 0.875rem;
+        }
+
+        #ui-footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end;
+            pointer-events: auto;
+        }
+
+        .glass-panel {
+            background: var(--surface);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 1.5rem;
+            padding: 1.25rem;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+        }
+
+        #controls-bar {
+            display: flex;
+            gap: 1rem;
+        }
+
+        .btn {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: var(--text);
+            padding: 0.75rem 1.25rem;
+            border-radius: 1rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.875rem;
+        }
+
+        .btn:hover {
+            background: rgba(255, 255, 255, 0.15);
+            transform: translateY(-2px);
+        }
+
+        .btn.active {
+            background: var(--primary);
+            border-color: var(--primary);
+            box-shadow: 0 4px 15px rgba(99, 102, 241, 0.5);
+        }
+
+        #job-fetcher {
+            width: 320px;
+        }
+
+        #job-fetcher h3 {
+            font-size: 0.875rem;
+            margin-bottom: 0.75rem;
+            color: var(--text-dim);
+        }
+
+        .input-group {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        input {
+            flex: 1;
+            background: rgba(0, 0, 0, 0.2);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 0.75rem;
+            padding: 0.6rem 1rem;
+            color: white;
+            font-size: 0.875rem;
+            outline: none;
+        }
+
+        input:focus {
+            border-color: var(--primary);
+        }
+
+        #status-pill {
+            position: absolute;
+            top: 2.5rem;
+            right: 2.5rem;
+            pointer-events: auto;
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            padding: 0.6rem 1.25rem;
+            border-radius: 9999px;
+            font-size: 0.875rem;
+            font-weight: 500;
+            background: var(--surface);
+            backdrop-filter: blur(8px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            background: var(--success);
+            border-radius: 50%;
+            box-shadow: 0 0 10px var(--success);
+        }
+
+        .status-dot.pulse {
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.4); opacity: 0.6; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+
+        #model-info {
+            position: absolute;
+            right: 2.5rem;
+            top: 6rem;
+            pointer-events: auto;
+            width: 240px;
+            display: none;
+        }
+
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 0.5rem;
+            font-size: 0.8125rem;
+        }
+
+        .info-row span:first-child {
+            color: var(--text-dim);
+        }
+    </style>
+</head>
+<body>
+    <div id="view-container"></div>
+
+    <div id="overlay">
+        <div id="header">
+            <h1>MORPHIC PHOTOGRAMMETRY</h1>
+            <p>Cloud-Accelerated 3D Reconstruction</p>
+        </div>
+
+        <div id="status-pill">
+            <div class="status-dot"></div>
+            <span id="status-text">Engine Ready</span>
+        </div>
+
+        <div id="model-info" class="glass-panel">
+            <div class="info-row"><span>Status</span><span id="job-status-val">Waiting</span></div>
+            <div class="info-row"><span>Triangles</span><span id="poly-count">--</span></div>
+            <div class="info-row"><span>Dense Mesh</span><span id="mesh-ready">--</span></div>
+        </div>
+
+        <div id="ui-footer">
+            <div id="job-fetcher" class="glass-panel">
+                <h3>Load Reconstruction Job</h3>
+                <div class="input-group">
+                    <input type="text" id="job-id-input" placeholder="Enter Job ID...">
+                    <button class="btn active" id="btn-load">LOAD</button>
+                </div>
+            </div>
+
+            <div id="controls-bar" class="glass-panel">
+                <button class="btn" id="btn-rotate">Auto Rotate</button>
+                <button class="btn" id="btn-dl-ply">Export PLY</button>
+                <button class="btn" id="btn-dl-obj">Export OBJ</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Import Map for Three.js -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module" src="viewer.js"></script>
+
+    <script>
+        // UI Handling
+        const btnLoad = document.getElementById('btn-load');
+        const jobIdInput = document.getElementById('job-id-input');
+        const statusText = document.getElementById('status-text');
+        const statusDot = document.querySelector('.status-dot');
+        const modelInfo = document.getElementById('model-info');
+
+        btnLoad.onclick = async () => {
+            const jobId = jobIdInput.value.trim();
+            if (!jobId) return;
+
+            statusText.innerText = `Fetching job ${jobId.slice(0, 8)}...`;
+            statusDot.classList.add('pulse');
+            modelInfo.style.display = 'block';
+
+            try {
+                // Fetch job status from our FastAPI backend
+                const response = await fetch(`/api/v1/jobs/${jobId}/status`);
+                const job = await response.json();
+
+                if (job.status === 'completed' && job.results) {
+                    statusText.innerText = 'Model Loaded Successfully';
+                    statusDot.classList.remove('pulse');
+                    document.getElementById('job-status-val').innerText = 'Completed';
+                    document.getElementById('mesh-ready').innerText = job.results.mesh_obj ? 'Yes' : 'No';
+                    
+                    // Load into viewer
+                    if (job.results.mesh_obj) {
+                        window.viewer.loadModel(job.results.mesh_obj, 'obj');
+                    } else if (job.results.sparse_ply) {
+                        window.viewer.loadModel(job.results.sparse_ply, 'ply');
+                    }
+                } else if (job.status === 'failed') {
+                    statusText.innerText = 'Job Failed';
+                    statusText.style.color = '#ef4444';
+                    statusDot.style.background = '#ef4444';
+                    statusDot.style.boxShadow = '0 0 10px #ef4444';
+                    document.getElementById('job-status-val').innerText = 'Failed';
+                } else {
+                    statusText.innerText = `Job ${job.status}...`;
+                    document.getElementById('job-status-val').innerText = job.status;
+                    // Poll again link or just wait
+                }
+            } catch (err) {
+                console.error(err);
+                statusText.innerText = 'Backend Unreachable';
+            }
+        };
+
+        document.getElementById('btn-rotate').onclick = (e) => {
+            e.target.classList.toggle('active');
+            window.viewer.toggleAutoRotate();
+        };
+    </script>
+</body>
+</html>

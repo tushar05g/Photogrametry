@@ -1,88 +1,36 @@
-from fastapi import FastAPI
+import os
+import uvicorn
+import logging
+import asyncio
+import redis.asyncio as redis
+from pathlib import Path
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-import sys
-import os
+from backend.api import upload, scans
+from backend.config import settings
+from backend.core.db import engine, Base
+from backend.core.observability import setup_logging
+from backend.websocket.manager import manager
 
-# 🎓 Add project root to sys.path at the front to resolve 'core' without being shadowed by backend/core
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from backend.api import scans, upload
-import os
-import logging
-from datetime import datetime
-
-# 🎓 TEACHER'S NOTE: Set up logging so you can see what's happening in production.
-# Logs help you debug issues and monitor your app's health.
-import os
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('logs/backend.log', mode='a')
-    ]
-)
+# 🔍 Initialize Advanced Structured Logging (v8.1.0)
+setup_logging()
 logger = logging.getLogger(__name__)
 
-def validate_environment():
-    """Validate required environment variables on startup."""
-    from backend.core.config import DATABASE_URL, CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET, REDIS_URL
-    
-    # Check for missing values in the config module directly
-    if not CLOUDINARY_CLOUD_NAME or not CLOUDINARY_API_KEY or not CLOUDINARY_API_SECRET:
-        raise RuntimeError("Missing required Cloudinary environment variables in .env")
-    
-    # Validate database connection with retries
-    max_retries = 3
-    retry_delay = 2
-    for attempt in range(max_retries):
-        try:
-            from backend.core.db import get_db
-            db = next(get_db())
-            from sqlalchemy import text
-            db.execute(text("SELECT 1"))
-            logger.info("✅ Database connection validated")
-            break
-        except Exception as e:
-            if attempt < max_retries - 1:
-                logger.warning(f"⚠️ Database connection attempt {attempt + 1} failed: {e}. Retrying in {retry_delay}s...")
-                import time
-                time.sleep(retry_delay)
-            else:
-                logger.error(f"❌ Database connection failed after {max_retries} attempts: {e}")
-                raise RuntimeError(f"Database connection failed: {e}")
-    
-    # Validate Redis connection
-    try:
-        import redis
-        r = redis.from_url(REDIS_URL)
-        r.ping()
-        logger.info("✅ Redis connection validated")
-    except Exception as e:
-        logger.warning(f"⚠️ Redis connection check failed (is it running?): {e}")
+# 🗄️ Database Initialization
+Base.metadata.create_all(bind=engine)
 
-    logger.info("✅ Environment validation passed")
+app = FastAPI(
+    title=settings.PROJECT_NAME,
+    version="9.0.0",
+    description="Distributed Photogrammetry Pipeline with Neon DB and Storage Abstraction."
+)
 
-# Run validation on import
-validate_environment()
+@app.on_event("startup")
+async def startup_event():
+    logger.info("🚀 Backend starting on http://localhost:8000")
 
-# 🎓 TEACHER'S NOTE: This is the "heart" of your 3D scanner app!
-app = FastAPI(title="Morphic 3D Scanner API", version="3.0.0")
-
-# Register all route groups
-app.include_router(scans.router, prefix="/scans", tags=["Scans"])
-app.include_router(upload.router, prefix="/api/v1", tags=["API v1"])  # New upload endpoints
-
-# Mount frontend and output directory
-app.mount("/frontend", StaticFiles(directory="frontend"), name="frontend")
-app.mount("/static", StaticFiles(directory="frontend"), name="static")
-# Create output dir if it doesn't exist to avoid mount errors during dev
-os.makedirs("output", exist_ok=True)
-app.mount("/static/output", StaticFiles(directory="output"), name="output")
-
-# 🛡️ CORS Middleware
-from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -91,80 +39,62 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 🛡️ Rate Limiting
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded
-from slowapi.middleware import SlowAPIMiddleware
+# --- API Routers (MUST be registered before catch-all) ---
+app.include_router(upload.router, prefix=f"{settings.API_V1_STR}/jobs", tags=["Upload"])
+app.include_router(scans.router, prefix=f"{settings.API_V1_STR}/scans", tags=["Status"])
 
-limiter = Limiter(key_func=get_remote_address)
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-app.add_middleware(SlowAPIMiddleware)
+# --- Static Files ---
+app.mount("/static", StaticFiles(directory="frontend"), name="static")
 
+# --- Explicit Routes ---
 @app.get("/")
-async def read_index():
-    return FileResponse('frontend/index.html')
+async def serve_frontend():
+    return FileResponse("frontend/index.html")
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint for worker verification and system monitoring."""
-    from backend.core.config import REDIS_URL
-    import redis
-    try:
-        r = redis.from_url(REDIS_URL)
-        r.ping()
-        redis_ok = True
-    except Exception as e:
-        redis_ok = False
-        logger.warning(f"Redis health check failed: {e}")
+    return {"status": "online", "version": "9.0.0", "storage": settings.STORAGE_TYPE}
+
+# 🔌 WebSocket & Redis Pub/Sub Hybrid
+@app.websocket("/ws/{job_id}")
+async def websocket_endpoint(websocket: WebSocket, job_id: str):
+    await manager.connect(websocket, job_id)
     
-    return {
-        "status": "ok",
-        "version": "3.0",
-        "redis": "ok" if redis_ok else "error",
-        "timestamp": datetime.now().isoformat()
-    }
+    r = redis.from_url(settings.REDIS_URL)
+    pubsub = r.pubsub()
+    await pubsub.subscribe(f"job_status:{job_id}")
+    
+    async def listen_to_redis():
+        try:
+            async for message in pubsub.listen():
+                if message["type"] == "message":
+                    data = message["data"].decode("utf-8")
+                    import json
+                    await websocket.send_json(json.loads(data))
+        except Exception as e:
+            logger.error(f"Redis listen error: {e}")
 
-@app.get("/scans/{job_id}/progress")
-async def get_job_progress(job_id: str):
-    """Get real-time progress for a job."""
-    from backend.core.db import get_db
-    from backend.models.models import ScanJob
-    db = next(get_db())
-    job = db.query(ScanJob).filter(ScanJob.id == job_id).first()
-    if not job:
-        return {"error": "Job not found"}
-    return {
-        "job_id": job.id,
-        "status": job.status,
-        "progress": getattr(job, 'progress', 0),
-        "warnings": getattr(job, 'warnings', ''),
-        "error_message": getattr(job, 'error_message', ''),
-        "model_url": job.model_url,
-        "created_at": job.created_at.isoformat() if job.created_at else None,
-        "updated_at": job.updated_at.isoformat() if job.updated_at else None
-    }
-
-# --- ALIASES FOR NEW CPU FLOW ---
-@app.post("/generate-3d")
-async def generate_3d_alias(payload: scans.schemas.ScanCreateRequest):
-    """Alias for scan job creation from URLs."""
-    from backend.core.db import SessionLocal
-    db = SessionLocal()
+    listener_task = asyncio.create_task(listen_to_redis())
+    
     try:
-        # We need to handle the background_tasks or pass it
-        from fastapi import BackgroundTasks
-        bt = BackgroundTasks()
-        return scans.create_job_from_urls(payload, bt, db)
-    finally:
-        db.close()
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket, job_id)
+        listener_task.cancel()
+        await pubsub.unsubscribe(f"job_status:{job_id}")
 
-@app.get("/status/{job_id}")
-async def get_status_alias(job_id: str):
-    """Alias for the progress endpoint."""
-    return await get_job_progress(job_id)
+# 🌐 Catch-All SPA Route (MUST BE LAST — after all API routes)
+@app.get("/{path:path}")
+async def catch_all(path: str):
+    if path.startswith("api/") or path == "health" or path.startswith("ws/"):
+        raise HTTPException(status_code=404, detail="Not Found")
+    
+    file_path = Path("frontend") / path
+    if file_path.exists() and file_path.is_file():
+        return FileResponse(file_path)
+    
+    return FileResponse("frontend/index.html")
 
 if __name__ == "__main__":
-    import uvicorn
     uvicorn.run("backend.main:app", host="0.0.0.0", port=8000, reload=True)

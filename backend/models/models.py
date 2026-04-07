@@ -1,73 +1,36 @@
-from sqlalchemy import Column, String, DateTime, Text, Enum as SQLEnum
-from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.sql import func
 import uuid
-
-from backend.core.db import Base
-from enum import Enum
-
-# NEW IMPORTS FOR RELATIONSHIPS
+from datetime import datetime
+from sqlalchemy import Column, String, DateTime, ForeignKey, Integer, Float, JSON, Enum as SQLEnum
 from sqlalchemy.orm import relationship
-from sqlalchemy import ForeignKey
+from sqlalchemy.sql import func
+from backend.core.db import Base
+from shared.schemas import JobStatus, JobStage, StageStatus
 
-# 🎓 TEACHER'S NOTE: This file defines your database structure!
-# SQLAlchemy is like a "Python-to-SQL translator" - you write Python classes,
-# and it creates database tables automatically.
-# 
-# WHY UUIDs? They're unique across the universe and prevent ID guessing attacks.
-# WHY Enums? They restrict values to specific options (like status: pending/completed).
-# WHY Relationships? They link tables together (one job has many images).
+class Job(Base):
+    __tablename__ = "jobs"
 
-class JobStatus(str, Enum):
-    initializing = "initializing"
-    uploading = "uploading"
-    pending = "pending"
-    processing = "processing"
-    completed = "completed"
-    failed = "failed"
-    cancelled = "cancelled"
-
-class ReferenceType(str, Enum):
-    regular = "false"
-    coin = "coin"
-
-class ScanJob(Base):
-    __tablename__ = "scan_jobs"
-
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    status = Column(SQLEnum(JobStatus), default=JobStatus.pending)
-    input_path = Column(String, nullable=True)
-    output_model_path = Column(String, nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True) # ⚡ INDEXED
+    job_id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    project_name = Column(String(100), nullable=True)
+    status = Column(SQLEnum(JobStatus), default=JobStatus.PENDING, index=True)
+    current_stage = Column(SQLEnum(JobStage), default=JobStage.IDLE, index=True)
     
-    # NEW COLUMN: Scaling info (e.g., "1 coin = 2cm")
-    reference_scale = Column(String, nullable=True) 
-    model_url = Column(String, nullable=True) # 👈 For the final 3D file
-    error_message = Column(Text, nullable=True) # 👈 To help us debug failures
-    warnings = Column(Text, nullable=True) # 👈 For non-fatal issues (e.g. masking failed)
-    project_name = Column(String, default="Untitled Scan", index=True) # ⚡ INDEXED
-    progress = Column(String, nullable=True) # 👈 For real-time progress updates
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now()) # 👈 Track last update
-
-    # NEW RELATIONSHIP: This lets us say `job.images` in Python
-    # back_populates="job" means the ScanImage class has a variable called `job` that points back here.
-    images = relationship("ScanImage", back_populates="job", cascade="all, delete-orphan")
-
-
-# NEW TABLE: To store individual uploaded photos
-class ScanImage(Base):
-    __tablename__ = "scan_images"
-
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    file_path = Column(String, nullable=False) # This will be the Cloudinary URL
+    # Time Tracking
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
     
-    # 🧪 REFACTORED: Now uses a proper Enum
-    is_reference = Column(SQLEnum(ReferenceType), default=ReferenceType.regular) 
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    # Relationships
+    stages = relationship("Stage", back_populates="job", cascade="all, delete-orphan")
 
-    # THE FOREIGN KEY: This connects the image to the specific job (as you correctly explained!)
-    job_id = Column(UUID(as_uuid=True), ForeignKey("scan_jobs.id"))
+class Stage(Base):
+    __tablename__ = "stages"
 
-    # THE RELATIONSHIP: This lets us say `image.job` in Python to get the ScanJob it belongs to
-    job = relationship("ScanJob", back_populates="images")
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_id = Column(String(36), ForeignKey("jobs.job_id"), nullable=False)
+    stage_name = Column(SQLEnum(JobStage), nullable=False)
+    status = Column(SQLEnum(StageStatus), default=StageStatus.PENDING)
+    
+    start_time = Column(DateTime(timezone=True), nullable=True)
+    end_time = Column(DateTime(timezone=True), nullable=True)
+    error_message = Column(String, nullable=True)
 
+    job = relationship("Job", back_populates="stages")

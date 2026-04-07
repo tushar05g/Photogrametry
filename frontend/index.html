@@ -759,6 +759,17 @@
                 currentJobId = result.job_id;
                 localStorage.setItem('currentJobId', currentJobId);
 
+                // Start processing after upload
+                statusDiv.innerHTML = `<p>Starting 3D reconstruction...</p>`;
+                const startResponse = await fetch(`/scans/${currentJobId}/start`, {
+                    method: 'POST'
+                });
+
+                if (!startResponse.ok) {
+                    const errorData = await startResponse.json();
+                    throw new Error(errorData.detail || "Failed to start processing");
+                }
+
                 // Refresh history from backend immediately
                 if (typeof renderHistory === 'function') renderHistory();
 

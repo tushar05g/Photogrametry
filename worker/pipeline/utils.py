@@ -19,7 +19,7 @@ def _broadcast(job_id: str, data: dict):
     except Exception as e:
         logger.warning(f"Failed to publish to Redis: {e}")
 
-def update_job_status(job_id: str, status: JobStatus = None, current_stage: JobStage = None):
+def update_job_status(job_id: str, status: JobStatus = None, current_stage: JobStage = None, results: dict = None):
     with SessionLocal() as db:
         job = db.query(Job).filter(Job.job_id == job_id).first()
         if job:
@@ -27,12 +27,21 @@ def update_job_status(job_id: str, status: JobStatus = None, current_stage: JobS
                 job.status = status
             if current_stage:
                 job.current_stage = current_stage
+            if results:
+                if job.results:
+                    # Update existing results dict
+                    updated_results = dict(job.results)
+                    updated_results.update(results)
+                    job.results = updated_results
+                else:
+                    job.results = results
             db.commit()
             
             _broadcast(job_id, {
                 "job_id": job_id,
                 "status": job.status,
                 "current_stage": job.current_stage,
+                "results": job.results,
                 "updated_at": job.updated_at
             })
 
@@ -60,7 +69,7 @@ def start_stage(job_id: str, stage_name: JobStage):
             "stage_status": StageStatus.IN_PROGRESS
         })
 
-def complete_stage(job_id: str, stage_name: JobStage):
+def complete_stage(job_id: str, stage_name: JobStage, results: dict = None):
     with SessionLocal() as db:
         stage = db.query(Stage).filter(Stage.job_id == job_id, Stage.stage_name == stage_name).first()
         if stage:
@@ -68,10 +77,14 @@ def complete_stage(job_id: str, stage_name: JobStage):
             stage.end_time = datetime.now()
             db.commit()
             
+            # Use update_job_status to broadcast and update Job level results
+            update_job_status(job_id, current_stage=stage_name, results=results)
+            
             _broadcast(job_id, {
                 "job_id": job_id,
                 "current_stage": stage_name,
-                "stage_status": StageStatus.COMPLETED
+                "stage_status": StageStatus.COMPLETED,
+                "results": results
             })
 
 def fail_stage(job_id: str, stage_name: JobStage, error_message: str):

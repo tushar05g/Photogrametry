@@ -43,17 +43,17 @@ def test_pipeline_e2e():
             if status_response.status_code == 200:
                 status_data = status_response.json()
                 status = status_data["status"]
-                stage = status_data.get("stage", "PENDING")
+                stage = status_data.get("current_stage") or status_data.get("stage", "PENDING")
                 message = status_data.get("message", "")
                 
                 if stage != last_stage:
                     print(f"📍 Stage: {stage} - {message}")
                     last_stage = stage
                 
-                if status == "completed":
+                if status == "COMPLETED":
                     print(f"🎉 Job completed successfully in {time.time() - start_time:.1f}s!")
                     break
-                elif status == "failed":
+                elif status == "FAILED":
                     print(f"❌ Job failed: {message}")
                     break
             else:
@@ -71,7 +71,9 @@ def test_pipeline_e2e():
     results_response = requests.get(f"{API_V1}/scans/{job_id}/results")
     if results_response.status_code == 200:
         results_data = results_response.json()
-        print(f"✅ Results: {results_data['results']}")
+        print(f"✅ Model URL: {results_data.get('model_url')}")
+        print(f"✅ SPLAT URL: {results_data.get('splat_url')}")
+        print(f"✅ Results: {results_data.get('results')}")
     else:
         print(f"❌ Failed to fetch results: {results_response.text}")
 

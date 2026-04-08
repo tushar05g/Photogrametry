@@ -1,41 +1,42 @@
-from fastapi import APIRouter, HTTPException
+from typing import List
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from backend.core.db import get_db
 from backend.models.models import Job
-from backend.core.db import SessionLocal
-from typing import Dict, Any
+from shared.schemas import JobStatusResponse, JobResultResponse
 
 router = APIRouter()
 
-@router.get("/{job_id}/status")
-async def get_job_status(job_id: str):
-    with SessionLocal() as db:
-        job = db.query(Job).filter(Job.job_id == job_id).first()
-        if not job:
-            raise HTTPException(status_code=404, detail="Job not found")
-        return {
-            "job_id": job.job_id,
-            "status": str(job.status.value).upper(),  # COMPLETED, FAILED, IN_PROGRESS etc
-            "current_stage": str(job.current_stage.value).upper(),
-            "updated_at": str(job.updated_at)
-        }
+@router.get("/", response_model=List[JobStatusResponse])
+def list_jobs(db: Session = Depends(get_db)):
+    """List all photogrammetry jobs."""
+    jobs = db.query(Job).order_by(Job.created_at.desc()).all()
+    return jobs
 
-@router.get("/{job_id}/results")
-async def get_job_results(job_id: str):
-    with SessionLocal() as db:
-        job = db.query(Job).filter(Job.job_id == job_id).first()
-        if not job:
-            raise HTTPException(status_code=404, detail="Job not found")
-        
-        # In a real app, we'd check if COMPLETED and return the download URL
-        # For now, just return placeholder URLs based on STORAGE_TYPE
-        return {
-            "job_id": job.job_id,
-            "status": job.status,
-            "model_url": f"/jobs/{job_id}/output/mesh.obj",
-            "splat_url": f"/jobs/{job_id}/output/model.splat"
-        }
+@router.get("/{job_id}", response_model=JobStatusResponse)
+def get_job(job_id: str, db: Session = Depends(get_db)):
+    """Get details of a specific job."""
+    job = db.query(Job).filter(Job.job_id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
 
-@router.get("/")
-async def list_jobs():
-    with SessionLocal() as db:
-        jobs = db.query(Job).all()
-        return [{"job_id": j.job_id, "status": j.status} for j in jobs]
+@router.get("/{job_id}/status", response_model=JobStatusResponse)
+def get_job_status(job_id: str, db: Session = Depends(get_db)):
+    """Get the current status and stage of a job."""
+    job = db.query(Job).filter(Job.job_id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+@router.get("/{job_id}/results", response_model=JobResultResponse)
+def get_job_results(job_id: str, db: Session = Depends(get_db)):
+    """Get the reconstruction results (URLs) for a job."""
+    job = db.query(Job).filter(Job.job_id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    return JobResultResponse(
+        job_id=job.job_id,
+        results=job.results or {}
+    )

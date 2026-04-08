@@ -5,6 +5,7 @@ from storage.provider import StorageProvider
 from storage.local_provider import LocalStorageProvider
 from storage.s3_provider import S3StorageProvider
 from storage.modal_provider import ModalStorageProvider
+from storage.cloudinary_provider import CloudinaryStorageProvider
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,12 @@ def get_storage_provider() -> StorageProvider:
     elif storage_type == "modal":
         logger.info("Using ModalStorageProvider")
         return ModalStorageProvider()
+    elif storage_type == "cloudinary":
+        from storage.fallback_provider import FallbackStorageProvider
+        logger.info("Using CloudinaryStorageProvider with Modal fallback")
+        primary = CloudinaryStorageProvider()
+        secondary = ModalStorageProvider()
+        return FallbackStorageProvider(primary, secondary)
     else:
         logger.info(f"Using LocalStorageProvider (base_path={settings.STORAGE_BASE_DIR})")
         return LocalStorageProvider(base_path=settings.STORAGE_BASE_DIR)

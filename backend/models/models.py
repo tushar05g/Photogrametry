@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, ForeignKey, Integer, Float, JSON, Enum as SQLEnum
+from sqlalchemy import Column, String, DateTime, ForeignKey, Integer, Float, JSON, Enum as SQLEnum, Boolean
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from backend.core.db import Base
@@ -13,6 +13,9 @@ class Job(Base):
     project_name = Column(String(100), nullable=True)
     status = Column(SQLEnum(JobStatus), default=JobStatus.PENDING, index=True)
     current_stage = Column(SQLEnum(JobStage), default=JobStage.IDLE, index=True)
+    is_video = Column(Boolean, default=False)
+    results = Column(JSON, nullable=True)
+    quality_report = Column(JSON, nullable=True)
     
     # Time Tracking
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)

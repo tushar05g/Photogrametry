@@ -28,7 +28,8 @@ image = (
         "scikit-learn",
         "pymeshlab",
         "trimesh",
-        "rembg"
+        "rembg",
+        "cloudinary"
     )
     .add_local_python_source("modal_worker")
     .add_local_python_source("storage")
@@ -37,6 +38,9 @@ image = (
 )
 
 secret = modal.Secret.from_name("photogrammetry-env")
+GPU_TYPE = os.getenv("MODAL_GPU_TYPE", "A10G")
+GPU_TIMEOUT_S = int(os.getenv("MODAL_GPU_TIMEOUT_S", "3600"))
+SPLAT_TIMEOUT_S = int(os.getenv("MODAL_SPLAT_TIMEOUT_S", "5400"))
 
 # Late dependency management
 try:
@@ -59,35 +63,48 @@ def run_stage(job_id: str, stage_name: str, robust: bool = True):
             pipeline.pull_input(stage_name)
             
             # 2. Run logic
+            telemetry = {}
             if stage_name == "SFM":
-                pipeline.run_sfm(robust=robust)
+                telemetry = pipeline.run_sfm(robust=robust)
             elif stage_name == "MVS":
-                pipeline.run_mvs()
+                telemetry = pipeline.run_mvs()
             elif stage_name == "MESH":
-                pipeline.run_mesh()
+                telemetry = pipeline.run_mesh()
             elif stage_name == "SPLAT":
-                pipeline.run_splat()
+                telemetry = pipeline.run_splat()
             
             # 3. Push results back
-            pipeline.push_output(stage_name)
+            results = pipeline.push_output(stage_name)
             
-            return {"job_id": job_id, "status": "completed"}
+            # Merge telemetry into results
+            if isinstance(telemetry, dict):
+                results.update(telemetry)
+            
+            return {"job_id": job_id, "status": "completed", "results": results}
         except Exception as e:
             logger.error(f"❌ GPU Stage {stage_name} Error: {str(e)}")
             return {"job_id": job_id, "status": "failed", "error": str(e)}
 
-@app.function(image=image, gpu="A10G", timeout=3600, volumes={"/mnt/storage": volume}, secrets=[secret])
+@app.function(image=image, gpu=GPU_TYPE, timeout=GPU_TIMEOUT_S, volumes={"/mnt/storage": volume}, secrets=[secret])
 def run_sfm(job_id: str, robust: bool = True):
     return run_stage(job_id, "SFM", robust)
 
-@app.function(image=image, gpu="A10G", timeout=3600, volumes={"/mnt/storage": volume}, secrets=[secret])
+@app.function(image=image, gpu=GPU_TYPE, timeout=GPU_TIMEOUT_S, volumes={"/mnt/storage": volume}, secrets=[secret])
 def run_mvs(job_id: str):
     return run_stage(job_id, "MVS")
 
-@app.function(image=image, gpu="A10G", timeout=3600, volumes={"/mnt/storage": volume}, secrets=[secret])
+@app.function(image=image, gpu=GPU_TYPE, timeout=GPU_TIMEOUT_S, volumes={"/mnt/storage": volume}, secrets=[secret])
 def run_mesh(job_id: str):
     return run_stage(job_id, "MESH")
 
-@app.function(image=image, gpu="A10G", timeout=3600, volumes={"/mnt/storage": volume}, secrets=[secret])
+@app.function(image=image, gpu=GPU_TYPE, timeout=SPLAT_TIMEOUT_S, volumes={"/mnt/storage": volume}, secrets=[secret])
 def run_splat(job_id: str):
     return run_stage(job_id, "SPLAT")
+
+@app.function(image=image, volumes={"/mnt/storage": volume}, secrets=[secret])
+def cleanup_job(job_id: str):
+    storage = get_storage_provider()
+    # We use a temporary workspace to instantiate the pipeline and call cleanup
+    with tempfile.TemporaryDirectory() as temp_dir:
+        pipeline = GPUPipeline(Path(temp_dir), storage, job_id)
+        return pipeline.cleanup()

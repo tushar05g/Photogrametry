@@ -1,8 +1,7 @@
 import logging
-import tempfile
-import shutil
-import io
 import requests
+import json
+import time
 from pathlib import Path
 from celery import chain
 from backend.core.celery_app import celery_app
@@ -15,16 +14,34 @@ from worker.pipeline.utils import (
     update_job_status, 
     is_stage_completed
 )
+from backend.core.db import SessionLocal
+from backend.models.models import Job
 from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
 MODAL_ERROR_MSG = "Unknown error on Modal"
+DEBUG_LOG_PATH = "/home/harpreet/Documents/3d_scanner/.cursor/debug-c66765.log"
+DEBUG_SESSION_ID = "c66765"
+
+
+def _debug_log(run_id: str, hypothesis_id: str, location: str, message: str, data: dict):
+    payload = {
+        "sessionId": DEBUG_SESSION_ID,
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(time.time() * 1000),
+    }
+    with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, default=str) + "\n")
 
 # 🏁 v9.0.0: Fully Abstracted & Resumable Pipeline
 
 @celery_app.task(name="worker.pipeline.tasks.initiate_pipeline")
-def initiate_pipeline(job_id: str, image_urls: list = None, enable_dense: bool = True, enable_splat: bool = False):
+def initiate_pipeline(job_id: str, image_urls: list = None, enable_dense: bool = True, enable_splat: bool = True):
     """
     Orchestrates the granular tasks. If job already exists, picks up from where it left off.
     """
@@ -33,12 +50,24 @@ def initiate_pipeline(job_id: str, image_urls: list = None, enable_dense: bool =
     # 1. Start Job in DB
     update_job_status(job_id, status=JobStatus.IN_PROGRESS)
     
-    # Define generic stage sequence with immutable signatures (.si) to avoid arg coupling
-    stages = [
-        (task_download.si(job_id, image_urls), JobStage.DOWNLOAD),
+    # Check if video job
+    with SessionLocal() as db:
+        job = db.query(Job).filter(Job.job_id == job_id).first()
+        is_video = job.is_video if job else False
+
+    # Define generic stage sequence
+    stages = []
+    
+    if is_video:
+        stages.append((task_extract_frames.si(job_id), JobStage.FRAME_EXTRACTION))
+    else:
+        logger.info(f"Skipping frame extraction for non-video job {job_id}")
+    stages.append((task_download.si(job_id, image_urls), JobStage.DOWNLOAD))
+
+    stages.extend([
         (task_preprocess.si(job_id), JobStage.PREPROCESS),
         (task_sfm.si(job_id), JobStage.SFM)
-    ]
+    ])
     
     if enable_dense:
         stages.append((task_mvs.si(job_id), JobStage.MVS))
@@ -54,6 +83,22 @@ def initiate_pipeline(job_id: str, image_urls: list = None, enable_dense: bool =
     for sig, stage_name in stages:
         if not is_stage_completed(job_id, stage_name):
             tasks_to_run.append(sig)
+    # region agent log
+    _debug_log(
+        run_id="model-quality-check",
+        hypothesis_id="H1",
+        location="worker/pipeline/tasks.py:initiate_pipeline",
+        message="Pipeline task chain selected",
+        data={
+            "job_id": job_id,
+            "is_video": is_video,
+            "enable_dense": enable_dense,
+            "enable_splat": enable_splat,
+            "tasks_to_run_count": len(tasks_to_run),
+            "tasks_to_run": [str(t) for t in tasks_to_run],
+        },
+    )
+    # endregion
             
     if not tasks_to_run:
         logger.info(f"✅ All stages for job {job_id} already completed.")
@@ -61,7 +106,13 @@ def initiate_pipeline(job_id: str, image_urls: list = None, enable_dense: bool =
         
     # Execute chain of remaining tasks
     pipeline_chain = chain(*tasks_to_run)
-    pipeline_chain.apply_async(task_id=f"chain-{job_id}")
+    # Ensure cleanup runs on both success and failure.
+    cleanup_sig = task_cleanup_assets.si(job_id)
+    pipeline_chain.apply_async(
+        task_id=f"chain-{job_id}",
+        link=cleanup_sig,
+        link_error=cleanup_sig
+    )
 
 @celery_app.task(bind=True, name="worker.pipeline.tasks.task_download", max_retries=3)
 def task_download(self, job_id: str, image_urls: list = None):
@@ -74,7 +125,15 @@ def task_download(self, job_id: str, image_urls: list = None):
     
     try:
         storage = get_storage_provider()
-        
+
+        # For direct uploads (image/video), files are already persisted in storage.
+        # Avoid extra listing latency/rate-limit pressure and mark this stage complete.
+        if not image_urls:
+            logger.info(f"No image URLs provided; using pre-uploaded assets for job {job_id}")
+            complete_stage(job_id, JobStage.DOWNLOAD)
+            return job_id
+
+        existing_input_files = storage.list_files(f"jobs/{job_id}/input/")
         if image_urls:
             for idx, url in enumerate(image_urls):
                 fname = f"img_{idx:03d}.jpg"
@@ -99,6 +158,30 @@ def task_download(self, job_id: str, image_urls: list = None):
         fail_stage(job_id, JobStage.DOWNLOAD, str(e))
         self.retry(exc=e, countdown=settings.RETRY_BACKOFF_SECONDS)
 
+@celery_app.task(bind=True, name="worker.pipeline.tasks.task_extract_frames", max_retries=2)
+def task_extract_frames(self, job_id: str):
+    if is_stage_completed(job_id, JobStage.FRAME_EXTRACTION):
+        return job_id
+
+    logger.info(f"🎞️ Starting FRAME_EXTRACTION for {job_id}")
+    start_stage(job_id, JobStage.FRAME_EXTRACTION)
+    
+    try:
+        import modal
+        f = modal.Function.from_name("photogrammetry-worker", "run_mesh")
+        f.remote(job_id)
+        from worker.pipeline.video_utils import process_job_videos
+        storage = get_storage_provider()
+        
+        process_job_videos(job_id, storage)
+        
+        complete_stage(job_id, JobStage.FRAME_EXTRACTION)
+        return job_id
+    except Exception as e:
+        logger.error(f"❌ FRAME_EXTRACTION failed: {e}")
+        fail_stage(job_id, JobStage.FRAME_EXTRACTION, str(e))
+        raise
+
 @celery_app.task(bind=True, name="worker.pipeline.tasks.task_preprocess", max_retries=3)
 def task_preprocess(self, job_id: str):
     if is_stage_completed(job_id, JobStage.PREPROCESS):
@@ -116,31 +199,66 @@ def task_preprocess(self, job_id: str):
         input_files = storage.list_files(f"jobs/{job_id}/input/")
         if not input_files:
             raise RuntimeError(f"No input images for job {job_id}")
+        processed_count = 0
+        decode_failures = 0
+        resized_count = 0
 
         # 2. Process each image without local file leak (streaming/abstraction)
         for remote_input in input_files:
             if not remote_input.lower().endswith(('.jpg', '.jpeg', '.png')):
                 continue
+            normalized_input = remote_input.lstrip("/")
                 
             # Download bytes
-            img_bytes = storage.download_file(remote_input)
+            img_bytes = storage.download_file(normalized_input)
             
             # Decode with CV2
             nparr = np.frombuffer(img_bytes, np.uint8)
             img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             
             if img is None:
+                decode_failures += 1
                 continue
             
-            # Resize
+            # 🏁 v10.0.0: High-Resolution Preprocessing
             h, w = img.shape[:2]
+            target_dim = 1024
             if max(h, w) > 2400:
                 scale = 2400 / max(h, w)
-                img = cv2.resize(img, (int(w*scale), int(h*scale)))
+                img = cv2.resize(img, (int(w*scale), int(h*scale)), interpolation=cv2.INTER_AREA)
+                resized_count += 1
+            elif max(h, w) < target_dim:
+                logger.info(f"🔍 Upscaling small image {normalized_input} ({w}x{h} -> {target_dim})")
+                scale = target_dim / max(h, w)
+                img = cv2.resize(img, (int(w*scale), int(h*scale)), interpolation=cv2.INTER_CUBIC)
+                resized_count += 1
             
-            # Encode and upload
-            _, buffer = cv2.imencode(".jpg", img)
-            storage.upload_file(f"jobs/{job_id}/input/preprocessed/{Path(remote_input).name}", buffer.tobytes())
+            # Encode and upload.
+            # Keep lossless PNG to preserve corners/textures used by SfM matching.
+            ok, buffer = cv2.imencode(".png", img)
+            if not ok:
+                decode_failures += 1
+                continue
+            storage.upload_file(
+                f"jobs/{job_id}/input/preprocessed/{Path(normalized_input).stem}.png",
+                buffer.tobytes()
+            )
+            processed_count += 1
+        # region agent log
+        _debug_log(
+            run_id="model-quality-check",
+            hypothesis_id="H2",
+            location="worker/pipeline/tasks.py:task_preprocess",
+            message="Preprocess output summary",
+            data={
+                "job_id": job_id,
+                "input_count": len(input_files),
+                "processed_count": processed_count,
+                "decode_failures": decode_failures,
+                "resized_count": resized_count,
+            },
+        )
+        # endregion
                 
         complete_stage(job_id, JobStage.PREPROCESS)
         return job_id
@@ -159,14 +277,28 @@ def task_sfm(self, job_id: str):
     
     try:
         import modal
-        f = modal.Function.from_name(settings.MODAL_APP_NAME, "run_sfm")
-        result = f.remote(job_id=job_id)
+        f = modal.Function.from_name("photogrammetry-worker", "run_sfm")
+        # v10.0.0: Capture quality metrics
+        metadata = f.remote(job_id)
+        logger.info(f"📊 SFM Metadata: {metadata}")
         
-        if result.get("status") == "completed":
-            complete_stage(job_id, JobStage.SFM)
-            return job_id
-        else:
-            raise RuntimeError(result.get("error", MODAL_ERROR_MSG))
+        # Results are nested under "results" from run_stage
+        res_data = metadata.get("results", {})
+        num_reg = res_data.get("num_registered", 0)
+        total = res_data.get("total_images", 1)
+        sparse_exists = res_data.get("sparse_model_exists", False)
+        
+        # Update Quality Report
+        update_quality_report(job_id, {"sfm": metadata})
+        
+        # Quality Gate
+        if not sparse_exists or (total > 3 and (num_reg / total) < 0.5):
+             msg = f"Alignment Failed: registered {num_reg}/{total} images. Dataset lacks sufficient visual overlap."
+             update_recommendation(job_id, msg)
+             raise RuntimeError(msg)
+        
+        complete_stage(job_id, JobStage.SFM)
+        return job_id
     except Exception as e:
         logger.error(f"❌ SFM failed: {e}")
         fail_stage(job_id, JobStage.SFM, str(e))
@@ -182,14 +314,23 @@ def task_mvs(self, job_id: str):
     
     try:
         import modal
-        f = modal.Function.from_name(settings.MODAL_APP_NAME, "run_mvs")
-        result = f.remote(job_id=job_id)
+        f = modal.Function.from_name("photogrammetry-worker", "run_mvs")
+        result = f.remote(job_id)
         
-        if result.get("status") == "completed":
-            complete_stage(job_id, JobStage.MVS)
-            return job_id
-        else:
-            raise RuntimeError(result.get("error", MODAL_ERROR_MSG))
+        logger.info(f"📊 MVS Metadata: {result}")
+        
+        # Update Quality Report
+        update_quality_report(job_id, {"mvs": result})
+        
+        # Strict Quality Gate
+        point_count = result.get("point_count", 0)
+        if point_count < 500:
+             msg = f"RECONSTRUCTION_FAILED_DATA_QUALITY: Insufficient point cloud density ({point_count} points)."
+             update_recommendation(job_id, "Subject surface has no detectable texture. Try adding some patterns or improved lighting.")
+             raise RuntimeError(msg)
+             
+        complete_stage(job_id, JobStage.MVS, results=result)
+        return job_id
     except Exception as e:
         logger.error(f"❌ MVS failed: {e}")
         fail_stage(job_id, JobStage.MVS, str(e))
@@ -207,16 +348,33 @@ def task_mesh(self, job_id: str):
         import modal
         f = modal.Function.from_name(settings.MODAL_APP_NAME, "run_mesh")
         result = f.remote(job_id=job_id)
+        # region agent log
+        _debug_log(
+            run_id="model-quality-check",
+            hypothesis_id="H4",
+            location="worker/pipeline/tasks.py:task_mesh",
+            message="Modal MESH result",
+            data={"job_id": job_id, "result": result},
+        )
+        # endregion
         
         if result.get("status") == "completed":
-            complete_stage(job_id, JobStage.MESH)
+            complete_stage(job_id, JobStage.MESH, results=result.get("results"))
             return job_id
         else:
             raise RuntimeError(result.get("error", MODAL_ERROR_MSG))
     except Exception as e:
-        logger.error(f"❌ MESH failed: {e}")
-        fail_stage(job_id, JobStage.MESH, str(e))
-        raise
+        # Soft-fail mesh so the pipeline can continue to SPLAT/EXPORT.
+        logger.warning(f"⚠️ MESH failed but continuing pipeline for {job_id}: {e}")
+        complete_stage(
+            job_id,
+            JobStage.MESH,
+            results={
+                "mesh_warning": str(e),
+                "mesh_status": "failed_continued"
+            }
+        )
+        return job_id
 
 @celery_app.task(bind=True, name="worker.pipeline.tasks.task_splat", queue="gpu_tasks")
 def task_splat(self, job_id: str):
@@ -230,9 +388,18 @@ def task_splat(self, job_id: str):
         import modal
         f = modal.Function.from_name(settings.MODAL_APP_NAME, "run_splat")
         result = f.remote(job_id=job_id)
+        # region agent log
+        _debug_log(
+            run_id="model-quality-check",
+            hypothesis_id="H5",
+            location="worker/pipeline/tasks.py:task_splat",
+            message="Modal SPLAT result",
+            data={"job_id": job_id, "result": result},
+        )
+        # endregion
         
         if result.get("status") == "completed":
-            complete_stage(job_id, JobStage.SPLAT)
+            complete_stage(job_id, JobStage.SPLAT, results=result.get("results"))
             return job_id
         else:
             raise RuntimeError(result.get("error", MODAL_ERROR_MSG))
@@ -246,3 +413,42 @@ def task_finalize(job_id: str):
     logger.info(f"✅ Finalizing job {job_id}")
     update_job_status(job_id, status=JobStatus.COMPLETED, current_stage=JobStage.EXPORT)
     return job_id
+
+@celery_app.task(name="worker.pipeline.tasks.task_cleanup_assets")
+def task_cleanup_assets(job_id: str):
+    logger.info(f"🧹 Starting CLEANUP for {job_id}")
+    try:
+        import modal
+        f = modal.Function.from_name("photogrammetry-worker", "cleanup_job")
+        f.remote(job_id)
+        logger.info(f"✅ CLEANUP successful for job {job_id}")
+    except Exception as e:
+        logger.warning(f"Cleanup encountered an issue for job {job_id}, but continuing: {e}")
+    return job_id
+
+def update_recommendation(job_id: str, message: str):
+    """
+    Helper to append/update recommendation in Job.results JSON
+    """
+    with SessionLocal() as db:
+        job = db.query(Job).filter(Job.job_id == job_id).first()
+        if job:
+            results = job.results or {}
+            # We preserve existing results but overwrite the recommendation
+            results["recommendation"] = message
+            job.results = results
+            db.commit()
+            logger.info(f"📝 Added recommendation to job {job_id}: {message}")
+
+def update_quality_report(job_id: str, data: dict):
+    """
+    Helper to merge data into Job.quality_report JSON column
+    """
+    with SessionLocal() as db:
+        job = db.query(Job).filter(Job.job_id == job_id).first()
+        if job:
+            report = job.quality_report or {}
+            report.update(data)
+            job.quality_report = report
+            db.commit()
+            logger.info(f"📊 Updated quality report for job {job_id}")

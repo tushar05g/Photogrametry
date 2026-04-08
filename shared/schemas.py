@@ -11,6 +11,7 @@ class JobStatus(str, Enum):
 
 class JobStage(str, Enum):
     IDLE = "IDLE"
+    FRAME_EXTRACTION = "FRAME_EXTRACTION"
     DOWNLOAD = "DOWNLOAD"
     PREPROCESS = "PREPROCESS"
     SFM = "SFM"
@@ -18,6 +19,7 @@ class JobStage(str, Enum):
     MESH = "MESH"
     SPLAT = "SPLAT"
     EXPORT = "EXPORT"
+    CLEANUP = "CLEANUP"
 
 class StageStatus(str, Enum):
     PENDING = "PENDING"
@@ -31,6 +33,7 @@ class JobStatusResponse(BaseModel):
     status: JobStatus
     current_stage: JobStage
     message: Optional[str] = None
+    results: Optional[Dict[str, str]] = None
     created_at: datetime
     updated_at: datetime
 

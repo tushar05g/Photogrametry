@@ -1,9 +1,10 @@
 import os
+import asyncio
 import uuid
 import shutil
 import logging
 from typing import List
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Form
 from pathlib import Path
 from backend.config import settings
 from storage.factory import get_storage_provider
@@ -15,15 +16,18 @@ from backend.models.models import Job
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+UNTITLED_SCAN = "Untitled Scan"
+
 @router.post("/init", response_model=JobStatusResponse)
-async def init_job(project_name: str = "Untitled Scan"):
+async def init_job(project_name: str = Form(UNTITLED_SCAN)):
     job_id = str(uuid.uuid4())
     with SessionLocal() as db:
         new_job = Job(
             job_id=job_id,
             project_name=project_name,
             status=JobStatus.PENDING,
-            current_stage=JobStage.IDLE
+            current_stage=JobStage.IDLE,
+            is_video=False
         )
         db.add(new_job)
         db.commit()
@@ -66,12 +70,15 @@ async def start_pipeline(job_id: str):
         job = db.query(Job).filter(Job.job_id == job_id).first()
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
-        initiate_pipeline.apply_async(kwargs={"job_id": job_id}, task_id=job_id)
+        initiate_pipeline.apply_async(
+            kwargs={"job_id": job_id, "enable_splat": True},
+            task_id=job_id
+        )
         return {"status": "started", "job_id": job_id}
 
 @router.post("/upload", response_model=JobStatusResponse)
 async def upload_images(
-    project_name: str = "Untitled Scan",
+    project_name: str = Form(UNTITLED_SCAN),
     files: List[UploadFile] = File(...)
 ):
     if len(files) < settings.MIN_IMAGES_PER_JOB:
@@ -89,7 +96,8 @@ async def upload_images(
             job_id=job_id, 
             project_name=project_name,
             status=JobStatus.PENDING, 
-            current_stage=JobStage.IDLE
+            current_stage=JobStage.IDLE,
+            is_video=False
         )
         db.add(new_job)
         db.commit()
@@ -105,11 +113,17 @@ async def upload_images(
             
             # Read file bytes into memory and upload directly
             file_bytes = await file.read()
-            storage.upload_file(remote_path, file_bytes)
+            if hasattr(storage, "upload_file_async"):
+                await storage.upload_file_async(remote_path, file_bytes)
+            else:
+                await asyncio.to_thread(storage.upload_file, remote_path, file_bytes)
             logger.info(f"Uploaded {fname} ({len(file_bytes)} bytes) to {remote_path}")
 
         # 3. Trigger Pipeline Chain
-        initiate_pipeline.apply_async(kwargs={"job_id": job_id}, task_id=job_id)
+        initiate_pipeline.apply_async(
+            kwargs={"job_id": job_id, "enable_splat": True},
+            task_id=job_id
+        )
 
         return JobStatusResponse(
             job_id=job_id,
@@ -124,6 +138,71 @@ async def upload_images(
     except Exception as e:
         logger.error(f"Upload failed for job {job_id}: {e}")
         # Mark as failed in DB
+        with SessionLocal() as db:
+            job = db.query(Job).filter(Job.job_id == job_id).first()
+            if job:
+                job.status = JobStatus.FAILED
+                db.commit()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/upload-video", response_model=JobStatusResponse)
+async def upload_videos(
+    project_name: str = Form(UNTITLED_SCAN),
+    files: List[UploadFile] = File(...)
+):
+    # For videos, we don't have a strict MIN count yet, but at least 1
+    if not files:
+        raise HTTPException(status_code=400, detail="At least one video required")
+
+    job_id = str(uuid.uuid4())
+    logger.info(f"Creating video job {job_id} with {len(files)} videos")
+
+    # 1. Create Job in DB
+    with SessionLocal() as db:
+        new_job = Job(
+            job_id=job_id, 
+            project_name=project_name,
+            status=JobStatus.PENDING, 
+            current_stage=JobStage.IDLE,
+            is_video=True
+        )
+        db.add(new_job)
+        db.commit()
+        db.refresh(new_job)
+
+    # 2. Upload to Storage
+    storage = get_storage_provider()
+
+    try:
+        for idx, file in enumerate(files):
+            fname = f"video_{idx:03d}{Path(file.filename).suffix}"
+            remote_path = f"jobs/{job_id}/videos/{fname}"
+            
+            file_bytes = await file.read()
+            if hasattr(storage, "upload_file_async"):
+                await storage.upload_file_async(remote_path, file_bytes)
+            else:
+                await asyncio.to_thread(storage.upload_file, remote_path, file_bytes)
+            logger.info(f"Uploaded {fname} ({len(file_bytes)} bytes) to {remote_path}")
+
+        # 3. Trigger Pipeline Chain (Starting with FRAME_EXTRACTION)
+        initiate_pipeline.apply_async(
+            kwargs={"job_id": job_id, "enable_splat": True},
+            task_id=job_id
+        )
+
+        return JobStatusResponse(
+            job_id=job_id,
+            project_name=new_job.project_name,
+            status=new_job.status,
+            current_stage=new_job.current_stage,
+            message="Videos uploaded and job initiated.",
+            created_at=new_job.created_at,
+            updated_at=new_job.updated_at
+        )
+
+    except Exception as e:
+        logger.error(f"Video upload failed for job {job_id}: {e}")
         with SessionLocal() as db:
             job = db.query(Job).filter(Job.job_id == job_id).first()
             if job:

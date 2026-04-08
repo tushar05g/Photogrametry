@@ -60,6 +60,11 @@ class Settings(BaseSettings):
     NGROK_AUTHTOKEN: str = os.getenv("NGROK_AUTHTOKEN", "")
     BACKEND_URL: str = os.getenv("BACKEND_URL", "http://localhost:8000")
     
+    # Cloudinary Integration (🏁 v7.1.0: Added for image hosting)
+    CLOUDINARY_CLOUD_NAME: str = os.getenv("CLOUDINARY_CLOUD_NAME", "")
+    CLOUDINARY_API_KEY: str = os.getenv("CLOUDINARY_API_KEY", "")
+    CLOUDINARY_API_SECRET: str = os.getenv("CLOUDINARY_API_SECRET", "")
+    
     # Modal
     MODAL_WORKSPACE: str = os.getenv("MODAL_WORKSPACE", "morphic")
     MODAL_APP_NAME: str = "photogrammetry-worker"
@@ -70,9 +75,10 @@ class Settings(BaseSettings):
     ENABLE_SPLAT: bool = os.getenv("ENABLE_SPLAT", "False").lower() == "true"
     
     # Resource Governance
-    MAX_UPLOAD_SIZE: int = 100 * 1024 * 1024
-    MAX_IMAGES_PER_JOB: int = 100
+    MAX_UPLOAD_SIZE: int = 500 * 1024 * 1024  # 🏁 v10.0.0: Increased to 500MB for video support
+    MAX_IMAGES_PER_JOB: int = 1000  # Increased for video frames
     MIN_IMAGES_PER_JOB: int = 3
+    FRAME_EXTRACTION_FPS: int = 2  # Default to 2 FPS as requested
     MAX_GPU_MINUTES: int = 30
     MAX_STORAGE_GB: float = 1.0
     

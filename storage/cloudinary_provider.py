@@ -26,6 +26,16 @@ class CloudinaryStorageProvider(StorageProvider):
     def get_url(self, path: str) -> str:
         """Get the public URL for a given path."""
         normalized = path.lstrip("/")
+        # 🏁 v10.1.0: Prevent double extensions for image/video
+        if normalized.lower().endswith(('.png', '.jpg', '.jpeg', '.mp4', '.mov')):
+            public_id = str(Path(normalized).with_suffix(''))
+            url, _ = cloudinary.utils.cloudinary_url(public_id, secure=True)
+            # Cloudinary might need the format specified if stripped from PID
+            fmt = Path(normalized).suffix.lstrip('.')
+            if not url.lower().endswith('.' + fmt.lower()):
+                url += '.' + fmt
+            return url
+        
         url, _ = cloudinary.utils.cloudinary_url(normalized, secure=True)
         return url
 
@@ -52,9 +62,14 @@ class CloudinaryStorageProvider(StorageProvider):
                 # If bytes, we'll use a temporary file or upload directly
                 import io
                 file_obj = io.BytesIO(data)
+                # 🏁 v10.1.0: Strip extension for Cloudinary public_id (images/videos)
+                public_id = path
+                if path.lower().endswith(('.png', '.jpg', '.jpeg', '.mp4', '.mov')):
+                    public_id = str(Path(path).with_suffix(''))
+
                 resp = cloudinary.uploader.upload(
                     file_obj,
-                    public_id=path,
+                    public_id=public_id,
                     overwrite=True,
                     resource_type="auto",
                     invalidate=True,
@@ -102,18 +117,34 @@ class CloudinaryStorageProvider(StorageProvider):
             raise
 
     def list_files(self, path: str) -> List[str]:
-        """List files in a prefix."""
+        """List files in a prefix by looping over resource types for immediate consistency."""
         try:
-            # Cloudinary search API
             prefix = path.rstrip('/')
-            resources = cloudinary.api.resources(
-                type="upload",
-                prefix=prefix,
-                max_results=500
-            )
-            # Cloudinary stores public_id without extension by default unless unique_filename=False
-            # But we are passing public_id=path (with extension). 
-            return [r["public_id"] for r in resources.get("resources", [])]
+            all_files = []
+            
+            # Loop over all possible resource types to avoid missing files misclassified by Cloudinary.
+            # This is more immediately consistent than the Search API.
+            for resource_type in ["image", "raw", "video"]:
+                try:
+                    resources = cloudinary.api.resources(
+                        type="upload",
+                        prefix=prefix,
+                        resource_type=resource_type,
+                        max_results=500
+                    )
+                    for r in resources.get("resources", []):
+                        pid = r["public_id"]
+                        fmt = r.get("format")
+                        
+                        # Reconstruct extension for images if missing in public_id
+                        if fmt and resource_type == "image" and not pid.lower().endswith("." + fmt.lower()):
+                            pid += "." + fmt
+                        all_files.append(pid)
+                except Exception as e:
+                    logger.debug(f"ℹ️ No {resource_type} resources found for {prefix}: {e}")
+                    continue
+                    
+            return list(set(all_files)) # Unique results
         except Exception as e:
             logger.error(f"❌ Cloudinary list failed for prefix {path}: {str(e)}")
             return []

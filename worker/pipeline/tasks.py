@@ -56,33 +56,32 @@ def initiate_pipeline(job_id: str, image_urls: list = None, enable_dense: bool =
         is_video = job.is_video if job else False
 
     # Define generic stage sequence
+    # First task gets initial arguments, subsequent tasks receive job_id from chain
     stages = []
     
     if is_video:
-        stages.append((task_extract_frames.si(job_id), JobStage.FRAME_EXTRACTION))
+        stages.append((task_extract_frames.s(job_id), JobStage.FRAME_EXTRACTION))
     else:
         logger.info(f"Skipping frame extraction for non-video job {job_id}")
-    stages.append((task_download.si(job_id, image_urls), JobStage.DOWNLOAD))
+    stages.append((task_download.s(job_id, image_urls), JobStage.DOWNLOAD))
 
     stages.extend([
-        (task_preprocess.si(job_id), JobStage.PREPROCESS),
-        (task_sfm.si(job_id), JobStage.SFM)
+        (task_preprocess.s(), JobStage.PREPROCESS),
+        (task_sfm.s(), JobStage.SFM)
     ])
     
     if enable_dense:
-        stages.append((task_mvs.si(job_id), JobStage.MVS))
-        stages.append((task_mesh.si(job_id), JobStage.MESH))
+        stages.append((task_mvs.s(), JobStage.MVS))
+        stages.append((task_mesh.s(), JobStage.MESH))
         
     if enable_splat:
-        stages.append((task_splat.si(job_id), JobStage.SPLAT))
+        stages.append((task_splat.s(), JobStage.SPLAT))
         
-    stages.append((task_finalize.si(job_id), JobStage.EXPORT))
+    stages.append((task_finalize.s(), JobStage.EXPORT))
     
-    # Filter out completed stages
-    tasks_to_run = []
-    for sig, stage_name in stages:
-        if not is_stage_completed(job_id, stage_name):
-            tasks_to_run.append(sig)
+    # Don't filter completed stages - keep chain intact
+    # Each task checks completion at runtime and skips if already done
+    tasks_to_run = [sig for sig, stage_name in stages]
     # region agent log
     _debug_log(
         run_id="model-quality-check",
@@ -322,19 +321,35 @@ def task_mvs(self, job_id: str):
         # Update Quality Report
         update_quality_report(job_id, {"mvs": result})
         
-        # Strict Quality Gate
+        if result.get("status") == "failed":
+            raise RuntimeError(result.get("error", "MVS stage failed on Modal"))
+
+        # Quality Check
         point_count = result.get("point_count", 0)
         if point_count < 500:
-             msg = f"RECONSTRUCTION_FAILED_DATA_QUALITY: Insufficient point cloud density ({point_count} points)."
+             msg = f"Low point cloud density ({point_count} points). Output may be sparse."
              update_recommendation(job_id, "Subject surface has no detectable texture. Try adding some patterns or improved lighting.")
-             raise RuntimeError(msg)
+             # 🏁 v10.1.0: Soft-fail for MVS
+             complete_stage(job_id, JobStage.MVS, results={
+                 "warning": msg,
+                 "status": "failed_continued",
+                 "point_count": point_count
+             })
+             return job_id
              
         complete_stage(job_id, JobStage.MVS, results=result)
         return job_id
     except Exception as e:
-        logger.error(f"❌ MVS failed: {e}")
-        fail_stage(job_id, JobStage.MVS, str(e))
-        raise
+        logger.warning(f"⚠️ MVS failed but continuing pipeline for {job_id}: {e}")
+        complete_stage(
+            job_id, 
+            JobStage.MVS, 
+            results={
+                "error": str(e),
+                "status": "failed_continued"
+            }
+        )
+        return job_id
 
 @celery_app.task(bind=True, name="worker.pipeline.tasks.task_mesh", queue="gpu_tasks")
 def task_mesh(self, job_id: str):
@@ -346,17 +361,8 @@ def task_mesh(self, job_id: str):
     
     try:
         import modal
-        f = modal.Function.from_name(settings.MODAL_APP_NAME, "run_mesh")
+        f = modal.Function.from_name("photogrammetry-worker", "run_mesh")
         result = f.remote(job_id=job_id)
-        # region agent log
-        _debug_log(
-            run_id="model-quality-check",
-            hypothesis_id="H4",
-            location="worker/pipeline/tasks.py:task_mesh",
-            message="Modal MESH result",
-            data={"job_id": job_id, "result": result},
-        )
-        # endregion
         
         if result.get("status") == "completed":
             complete_stage(job_id, JobStage.MESH, results=result.get("results"))
@@ -364,14 +370,14 @@ def task_mesh(self, job_id: str):
         else:
             raise RuntimeError(result.get("error", MODAL_ERROR_MSG))
     except Exception as e:
-        # Soft-fail mesh so the pipeline can continue to SPLAT/EXPORT.
+        # 🏁 v10.1.0: Soft-fail mesh so the pipeline can continue to SPLAT/EXPORT.
         logger.warning(f"⚠️ MESH failed but continuing pipeline for {job_id}: {e}")
         complete_stage(
             job_id,
             JobStage.MESH,
             results={
-                "mesh_warning": str(e),
-                "mesh_status": "failed_continued"
+                "warning": str(e),
+                "status": "failed_continued"
             }
         )
         return job_id

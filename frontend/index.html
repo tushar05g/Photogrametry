@@ -528,6 +528,58 @@
             }
         }
 
+        // --- Drag and Drop Functionality ---
+        const uploadArea = document.getElementById('areaImages');
+        const fileInput = document.getElementById('inputImages');
+
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            uploadArea.style.borderColor = 'var(--primary)';
+            uploadArea.style.background = 'rgba(0, 210, 255, 0.1)';
+        });
+
+        uploadArea.addEventListener('dragenter', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            uploadArea.style.borderColor = 'var(--primary)';
+            uploadArea.style.background = 'rgba(0, 210, 255, 0.1)';
+        });
+
+        uploadArea.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            uploadArea.style.borderColor = 'rgba(255, 255, 255, 0.2)';
+            uploadArea.style.background = 'transparent';
+        });
+
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            uploadArea.style.borderColor = 'rgba(255, 255, 255, 0.2)';
+            uploadArea.style.background = 'transparent';
+
+            const newFiles = e.dataTransfer.files;
+            if (newFiles.length > 0) {
+                // Create a DataTransfer object to append files
+                const dataTransfer = new DataTransfer();
+                
+                // Add existing files
+                for (let i = 0; i < fileInput.files.length; i++) {
+                    dataTransfer.items.add(fileInput.files[i]);
+                }
+                
+                // Add new files
+                for (let i = 0; i < newFiles.length; i++) {
+                    dataTransfer.items.add(newFiles[i]);
+                }
+                
+                // Set the combined files back to the input
+                fileInput.files = dataTransfer.files;
+                updateFileLabel('Images');
+            }
+        });
+
         // --- Tab Navigation ---
         function showPage(pageId) {
             document.querySelectorAll('.page-content').forEach(p => p.classList.remove('active'));
@@ -545,7 +597,7 @@
         async function renderHistory() {
             const list = document.getElementById('history-list');
             try {
-                const response = await fetch('/scans/');
+                const response = await fetch('/api/v1/scans/all');
                 const data = await response.json();
 
                 if (!data.scans || data.scans.length === 0) {
@@ -579,8 +631,7 @@
             if (!confirm("Permanently delete this scan?")) return;
 
             try {
-                await fetch(`/scans/${jobId}`, { method: 'DELETE' });
-                await fetch(`/scans/${jobId}`, { method: 'DELETE' });
+                await fetch(`/api/v1/scans/${jobId}`, { method: 'DELETE' });
                 renderHistory();
                 if (currentJobId === jobId) {
                     currentJobId = null;
@@ -623,7 +674,7 @@
             if (!currentJobId) return;
 
             try {
-                const response = await fetch(`/scans/${currentJobId}/progress`);
+                const response = await fetch(`/api/v1/scans/${currentJobId}/progress`);
                 if (!response.ok) return;
                 const job = await response.json();
 
@@ -654,7 +705,7 @@
 
                     if (window.init3DViewer) {
                         try {
-                            window.init3DViewer(job.model_url);
+                            window.init3DViewer(job.model_url, job.warnings);
                         } catch (e) {
                             console.error("3D Init Error:", e);
                         }
@@ -679,25 +730,26 @@
                     cancelBtn.style.display = "none";
                     currentJobId = null;
                     localStorage.removeItem('currentJobId');
-                } else if (job.status === 'processing') {
-                    if (!job.progress) {
+                } else if (job.status === 'processing' || job.status === 'in_progress') {
+                    if (job.progress) {
+                        statusDiv.innerHTML = `<p style="color: var(--primary); font-weight: 500;">🏗️ ${job.progress}</p>`;
+                        if (job.warnings) {
+                            statusDiv.innerHTML += `<p style="color: #f59e0b; font-size: 0.8rem; margin-top: 4px;">⚠️ ${job.warnings}</p>`;
+                        }
+                    } else {
                         statusDiv.innerHTML = `<p style="color: var(--primary);">🏗️ Building your 3D model...</p>`;
                     }
                     progContainer.classList.add('scanning-active');
                     cancelBtn.style.display = "block";
-                    setTimeout(checkStatus, 15000);
+                    setTimeout(checkStatus, 5000);
                 } else if (job.status === 'pending') {
-                    if (!job.progress) {
-                        statusDiv.innerHTML = `<p style="color: #94a3b8;">🛰️ Waiting for GPU to wake up...</p>`;
-                    }
+                    statusDiv.innerHTML = `<p style="color: #94a3b8;">🛰️ ${job.progress || 'Waiting for GPU to wake up...'}</p>`;
                     cancelBtn.style.display = "block";
-                    setTimeout(checkStatus, 10000);
+                    setTimeout(checkStatus, 5000);
                 } else {
-                    if (!job.progress) {
-                        statusDiv.innerHTML = `<p style="color: #94a3b8;">📦 Preparing Job...</p>`;
-                    }
+                    statusDiv.innerHTML = `<p style="color: #94a3b8;">📦 ${job.progress || 'Preparing Job...'}</p>`;
                     cancelBtn.style.display = "block";
-                    setTimeout(checkStatus, 10000);
+                    setTimeout(checkStatus, 5000);
                 }
             } catch (err) {
                 console.error("Status check failed", err);
@@ -710,7 +762,7 @@
             if (!confirm("Are you sure you want to cancel this scan?")) return;
 
             try {
-                const response = await fetch(`/scans/${currentJobId}/cancel`, { method: 'POST' });
+                const response = await fetch(`/api/v1/scans/${currentJobId}/cancel`, { method: 'POST' });
                 if (response.ok) {
                     statusDiv.innerHTML = "<p>Cancelling neural link...</p>";
                 }
@@ -745,7 +797,7 @@
 
                 statusDiv.innerHTML = `<p>Uploading ${allFiles.length} images directly to server...</p>`;
                 
-                const response = await fetch('/api/v1/images', {
+                const response = await fetch('/api/v1/jobs/upload', {
                     method: 'POST',
                     body: formData
                 });
@@ -797,20 +849,37 @@
         import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
         import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
 
-        window.init3DViewer = function (url) {
+        window.init3DViewer = function (url, warning = null) {
             // 🎓 CRITICAL: Show resultArea BEFORE creating the renderer.
-            // If the parent div is display:none, clientWidth/clientHeight = 0.
-            // Three.js would create a 0×0 canvas and render nothing.
             const resultArea = document.getElementById('resultArea');
             if (resultArea) resultArea.style.display = 'block';
+
+            // Display warnings if any
+            const statusDiv = document.getElementById('status');
+            if (warning) {
+                statusDiv.innerHTML = `
+                    <div style="background: rgba(245, 158, 11, 0.1); border: 1px solid #f59e0b; padding: 10px; border-radius: 8px; margin-bottom: 10px;">
+                        <p style="color: #f59e0b; font-size: 0.85rem; margin: 0;">⚠️ <b>Quality Warning:</b> ${warning}</p>
+                    </div>`;
+            } else {
+                statusDiv.innerHTML = '<div class="status-badge" style="background:rgba(34,197,94,0.2);color:#4ade80">✅ Reconstruction Successful!</div>';
+            }
 
             // Update the download link
             const dlLink = document.getElementById('downloadLink');
             if (dlLink) {
                 dlLink.href = url;
-                dlLink.download = url.includes('.glb') ? 'model.glb' : 'model.ply';
-                // dlLink.querySelector('span, svg + text') // keep icon but update text
-                dlLink.childNodes.forEach(n => { if (n.nodeType === 3) n.textContent = url.includes('.glb') ? ' Download GLB' : ' Download PLY'; });
+                const isGLB = url.toLowerCase().includes('.glb');
+                const isPLY = url.toLowerCase().includes('.ply');
+                
+                dlLink.download = isGLB ? 'model.glb' : (isPLY ? 'model.ply' : 'model.splat');
+                dlLink.childNodes.forEach(n => { 
+                    if (n.nodeType === 3) {
+                        if (isGLB) n.textContent = ' Download GLB Mesh';
+                        else if (isPLY) n.textContent = ' Download PLY Cloud';
+                        else n.textContent = ' Download Splat';
+                    }
+                });
             }
 
             const viewerDiv = document.getElementById('viewer3d');
@@ -865,8 +934,13 @@
 
             // ── Load 3D Model ────────────────────────────────────────
             const isGLB = url.toLowerCase().includes('.glb') || url.includes('resource_type=raw');
-            document.getElementById('status').innerHTML =
-                `<p style="color:#00d2ff">Streaming ${isGLB ? 'GLB mesh' : 'point cloud'}...</p>`;
+            const isSplatPreview = url.includes('splat_preview');
+            
+            const label = isSplatPreview ? 'Splat preview' : (isGLB ? '3D mesh' : 'point cloud');
+            const statusLabel = document.createElement('p');
+            statusLabel.style.cssText = "color:#00d2ff; font-size: 0.8rem; margin: 5px 0;";
+            statusLabel.textContent = `Streaming ${label}...`;
+            statusDiv.appendChild(statusLabel);
 
             function _addModelToScene(object) {
                 // Center and auto-scale the model

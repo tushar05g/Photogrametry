@@ -18,7 +18,7 @@ class ModalStorageProvider(StorageProvider):
         If running locally, we use remote volume access via Modal Client.
         """
         # Detection
-        self.is_inside_modal = os.environ.get("MODAL_PROJECT_NAME") is not None
+        self.is_inside_modal = os.environ.get("MODAL_ENVIRONMENT") is not None or os.environ.get("MODAL_IS_REMOTE") == "1"
         self.mount_path = Path(mount_path)
         self.volume_name = settings.STORAGE_BASE_DIR or "morphic-scan-data"
         

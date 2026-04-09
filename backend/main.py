@@ -46,6 +46,21 @@ app.include_router(scans.router, prefix=f"{settings.API_V1_STR}/scans", tags=["S
 # --- Static Files ---
 app.mount("/static", StaticFiles(directory="frontend"), name="static")
 
+# --- Legacy Redirects (for cached frontend clients) ---
+from fastapi.responses import RedirectResponse
+
+@app.get("/scans/")
+async def legacy_list_scans():
+    return RedirectResponse(url="/api/v1/scans/all")
+
+@app.get("/scans/{job_id}/progress")
+async def legacy_job_progress(job_id: str):
+    return RedirectResponse(url=f"/api/v1/scans/{job_id}/progress")
+
+@app.post("/scans/{job_id}/cancel")
+async def legacy_job_cancel(job_id: str):
+    return RedirectResponse(url=f"/api/v1/scans/{job_id}/cancel")
+
 # --- Explicit Routes ---
 @app.get("/")
 async def serve_frontend():
@@ -97,4 +112,4 @@ async def catch_all(path: str):
     return FileResponse("frontend/index.html")
 
 if __name__ == "__main__":
-    uvicorn.run("backend.main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("backend.main:app", host="0.0.0.0", port=8000, reload=True, reload_dirs=["backend", "shared", "worker"])

@@ -5,8 +5,6 @@ load_dotenv()
 engine = create_engine(os.getenv("DATABASE_URL"))
 with engine.connect() as conn:
     print("=== RECENT JOBS ===")
-    res = conn.execute(text("SELECT job_id, status, current_stage, updated_at, error FROM jobs ORDER BY updated_at DESC LIMIT 5"))
+    res = conn.execute(text("SELECT job_id, status, current_stage, updated_at FROM jobs ORDER BY updated_at DESC LIMIT 5"))
     for row in res:
-        print(f"Job: {row[0]} | Status: {row[1]} | Stage: {row[2]}")
-        if row[4]:
-            print(f"  Error: {row[4]}")
+        print(f"Job: {row[0]} | Status: {row[1]} | Stage: {row[2]} | Updated: {row[3]}")

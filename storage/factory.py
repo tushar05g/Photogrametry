@@ -16,9 +16,10 @@ def get_storage_provider() -> StorageProvider:
     # Prefer explicit STORAGE_TYPE setting
     storage_type = getattr(settings, "STORAGE_TYPE", "local").lower()
     
-    # Overwrite if we are in a Modal worker (determined by environment variable)
-    if os.environ.get("MODAL_PROJECT_NAME") or os.environ.get("MODAL_WORKER_ID"):
-        logger.info("Detected Modal environment, using ModalStorageProvider")
+    # Overwrite if we are in a Modal worker AND storage_type is 'modal' or explicitly missing
+    # Otherwise, prefer the explicit STORAGE_TYPE (e.g., 'cloudinary')
+    if (os.environ.get("MODAL_PROJECT_NAME") or os.environ.get("MODAL_WORKER_ID")) and storage_type == "local":
+        logger.info("Detected Modal environment without explicit Cloudinary/S3 config, defaulting to ModalStorageProvider")
         return ModalStorageProvider()
 
     if storage_type == "s3":

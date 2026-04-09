@@ -65,21 +65,22 @@ async def upload_single_image(job_id: str, file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/{job_id}/start")
-async def start_pipeline(job_id: str):
+async def start_pipeline(job_id: str, enable_splat: bool = True):
     with SessionLocal() as db:
         job = db.query(Job).filter(Job.job_id == job_id).first()
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
         initiate_pipeline.apply_async(
-            kwargs={"job_id": job_id, "enable_splat": True},
-            task_id=job_id
+            kwargs={"job_id": job_id, "enable_splat": enable_splat},
+            task_id=f"init-{job_id}"
         )
         return {"status": "started", "job_id": job_id}
 
 @router.post("/upload", response_model=JobStatusResponse)
 async def upload_images(
     project_name: str = Form(UNTITLED_SCAN),
-    files: List[UploadFile] = File(...)
+    files: List[UploadFile] = File(...),
+    enable_splat: bool = Form(True)
 ):
     if len(files) < settings.MIN_IMAGES_PER_JOB:
         raise HTTPException(status_code=400, detail=f"Minimum {settings.MIN_IMAGES_PER_JOB} images required")
@@ -121,8 +122,8 @@ async def upload_images(
 
         # 3. Trigger Pipeline Chain
         initiate_pipeline.apply_async(
-            kwargs={"job_id": job_id, "enable_splat": True},
-            task_id=job_id
+            kwargs={"job_id": job_id, "enable_splat": enable_splat},
+            task_id=f"init-{job_id}"
         )
 
         return JobStatusResponse(
@@ -148,7 +149,8 @@ async def upload_images(
 @router.post("/upload-video", response_model=JobStatusResponse)
 async def upload_videos(
     project_name: str = Form(UNTITLED_SCAN),
-    files: List[UploadFile] = File(...)
+    files: List[UploadFile] = File(...),
+    enable_splat: bool = Form(True)
 ):
     # For videos, we don't have a strict MIN count yet, but at least 1
     if not files:
@@ -187,8 +189,8 @@ async def upload_videos(
 
         # 3. Trigger Pipeline Chain (Starting with FRAME_EXTRACTION)
         initiate_pipeline.apply_async(
-            kwargs={"job_id": job_id, "enable_splat": True},
-            task_id=job_id
+            kwargs={"job_id": job_id, "enable_splat": enable_splat},
+            task_id=f"init-{job_id}"
         )
 
         return JobStatusResponse(

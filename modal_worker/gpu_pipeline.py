@@ -128,9 +128,22 @@ class GPUPipeline:
             if stage in ["MVS", "MESH", "SPLAT"]:
                 remote_sparse_prefix = f"jobs/{self.job_id}/output/sparse/"
                 files = self.storage.list_files(remote_sparse_prefix)
+                logger.info(f"📥 Sparse: Found {len(files)} files in {remote_sparse_prefix}")
+                
+                # 🏁 v10.1.0: Robust relative path reconstruction
+                # Providers (Modal, Cloudinary) return paths in different formats.
+                # We need to ensure we keep the subdirectory structure (e.g., /0/, /1/).
+                norm_prefix = remote_sparse_prefix.strip("/")
                 for f in files:
-                    rel_path = Path(f).relative_to(remote_sparse_prefix)
+                    norm_f = f.strip("/")
+                    if norm_f.startswith(norm_prefix):
+                        rel_path = Path(norm_f[len(norm_prefix):].lstrip("/"))
+                    else:
+                        rel_path = Path(f).name
+                        logger.warning(f"⚠️ Falling back to filename for {f}")
+                        
                     dest = self.sparse_dir / rel_path
+                    logger.info(f"📥 Sparse: Downloading {f} to {dest}")
                     _download_if_missing(f, dest)
 
             # Pull dense artifacts needed by MESH/SPLAT
@@ -167,10 +180,13 @@ class GPUPipeline:
         results = {}
         if stage == "SFM":
             # Push sparse model results to output/sparse/
-            for p in self.sparse_dir.rglob("*"):
+            sparse_files = list(self.sparse_dir.rglob("*"))
+            logger.info(f"📤 SFM: Found {len(sparse_files)} items in sparse_dir")
+            for p in sparse_files:
                 if p.is_file():
                     rel = p.relative_to(self.sparse_dir)
                     dest_key = f"jobs/{self.job_id}/output/sparse/{rel}"
+                    logger.info(f"📤 SFM: Uploading {rel} to {dest_key}")
                     url = self.storage.upload_file(dest_key, p)
                     if str(rel) in ["points3D.bin", "points3D.ply"]:
                         results["sparse_pcd"] = url

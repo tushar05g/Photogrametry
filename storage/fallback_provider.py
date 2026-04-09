@@ -96,6 +96,15 @@ class FallbackStorageProvider(StorageProvider):
             res = self.secondary.get_json(path)
         return res
 
+    def commit(self):
+        """Flush pending writes on providers that support it (e.g. Modal Volume)."""
+        for provider in (self.primary, self.secondary):
+            if hasattr(provider, "commit"):
+                try:
+                    provider.commit()
+                except Exception as e:
+                    logger.debug(f"commit() skipped for {type(provider).__name__}: {e}")
+
     def generate_signed_url(self, path: str, expires_in: int = 3600) -> str:
         try:
             return self.primary.generate_signed_url(path, expires_in)

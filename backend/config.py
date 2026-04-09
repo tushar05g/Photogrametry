@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     # Storage (🏁 v5.1.4: Keeping STORAGE_BASE_DIR as str for Modal Volume compatibility)
     STORAGE_TYPE: str = os.getenv("STORAGE_TYPE", "local")
     STORAGE_BASE_DIR: str = os.getenv("STORAGE_BASE_DIR", "morphic-scan-data")
+    _OUTPUT_DIR: str = os.getenv("OUTPUT_DIR", "output")
     
     # Derived paths as Path objects (Only used for LocalStorage)
     @property
@@ -44,7 +45,7 @@ class Settings(BaseSettings):
         
     @property
     def OUTPUT_DIR(self) -> Path:
-        p = Path(self.STORAGE_BASE_DIR) / "outputs"
+        p = Path(self._OUTPUT_DIR)
         p.mkdir(parents=True, exist_ok=True)
         return p
     

@@ -11,9 +11,9 @@ if [ "$ROLE" = "api" ]; then
     exec uvicorn backend.main:app --host 0.0.0.0 --port 8000
     
 elif [ "$ROLE" = "worker" ]; then
-    echo "⚙️ Starting Morphic 3D CPU Worker..."
-    # Start the worker loop from the core module
-    exec python -m core.workers.cpu_worker
+    echo "⚙️ Starting Morphic 3D Celery Worker..."
+    # Start Celery worker pointing to the app
+    exec celery -A backend.core.celery_app worker --loglevel=info
     
 else
     echo "❌ ERROR: No ROLE specified. Set ROLE=api or ROLE=worker."

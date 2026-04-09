@@ -1,3 +1,4 @@
+import os
 import logging
 import requests
 import json
@@ -35,6 +36,7 @@ def _debug_log(run_id: str, hypothesis_id: str, location: str, message: str, dat
         "data": data,
         "timestamp": int(time.time() * 1000),
     }
+    os.makedirs(os.path.dirname(DEBUG_LOG_PATH), exist_ok=True)
     with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
         f.write(json.dumps(payload, default=str) + "\n")
 

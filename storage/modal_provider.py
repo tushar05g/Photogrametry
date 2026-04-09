@@ -37,6 +37,26 @@ class ModalStorageProvider(StorageProvider):
         clean_path = remote_path.lstrip("/")
         return self.mount_path / clean_path
 
+    def _commit_volume(self):
+        """Persist local writes so other containers can see them."""
+        if self.is_inside_modal:
+            try:
+                volume = modal.Volume.from_name(self.volume_name)
+                volume.commit()
+                logger.debug("Modal volume committed")
+            except Exception as e:
+                logger.warning(f"Volume commit failed (non-fatal): {e}")
+
+    def _reload_volume(self):
+        """Refresh local view to see writes from other containers."""
+        if self.is_inside_modal:
+            try:
+                volume = modal.Volume.from_name(self.volume_name)
+                volume.reload()
+                logger.debug("Modal volume reloaded")
+            except Exception as e:
+                logger.warning(f"Volume reload failed (non-fatal): {e}")
+
     def upload_file(self, path: str, data: Union[bytes, Path, str]) -> str:
         if self.is_inside_modal:
             dest = self._get_volume_path(path)
@@ -63,6 +83,10 @@ class ModalStorageProvider(StorageProvider):
 
         logger.info(f"Modal storage: uploaded {path}")
         return path
+
+    def commit(self):
+        """Public commit — call after a batch of uploads to flush to volume."""
+        self._commit_volume()
 
     async def upload_file_async(self, path: str, data: Union[bytes, Path, str]) -> str:
         """Non-blocking version for use in FastAPI async endpoints."""
@@ -98,6 +122,8 @@ class ModalStorageProvider(StorageProvider):
 
     def list_files(self, path: str) -> List[str]:
         if self.is_inside_modal:
+            # Reload to see writes from other containers (e.g., SFM -> MVS handoff)
+            self._reload_volume()
             dir_path = self._get_volume_path(path)
             if not dir_path.exists(): return []
             if dir_path.is_file(): return [str(dir_path.relative_to(self.mount_path))]

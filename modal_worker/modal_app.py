@@ -76,6 +76,11 @@ def run_stage(job_id: str, stage_name: str, robust: bool = True):
             # 3. Push results back
             results = pipeline.push_output(stage_name)
             
+            # 4. Flush storage so next stage can see the files
+            if hasattr(storage, "commit"):
+                storage.commit()
+                logger.info(f"📤 Storage committed after {stage_name}")
+            
             # Merge telemetry into results
             if isinstance(telemetry, dict):
                 results.update(telemetry)

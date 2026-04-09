@@ -127,7 +127,22 @@ class GPUPipeline:
             # Sparse results are required by MVS/MESH and used as SPLAT fallback source.
             if stage in ["MVS", "MESH", "SPLAT"]:
                 remote_sparse_prefix = f"jobs/{self.job_id}/output/sparse/"
-                files = self.storage.list_files(remote_sparse_prefix)
+                
+                # Retry listing with backoff — defends against Cloudinary indexing
+                # lag and Modal volume commit propagation delay.
+                import time
+                files = []
+                for attempt in range(5):
+                    files = self.storage.list_files(remote_sparse_prefix)
+                    if files:
+                        break
+                    wait = 5 * (attempt + 1)  # 5, 10, 15, 20, 25 seconds
+                    logger.warning(
+                        f"⏳ Sparse listing empty (attempt {attempt+1}/5), "
+                        f"retrying in {wait}s for {self.job_id}"
+                    )
+                    time.sleep(wait)
+                
                 logger.info(f"📥 Sparse: Found {len(files)} files in {remote_sparse_prefix}")
                 
                 # 🏁 v10.1.0: Robust relative path reconstruction

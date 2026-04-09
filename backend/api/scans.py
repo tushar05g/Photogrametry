@@ -106,7 +106,7 @@ async def upload_scans(
             print(f"Coin detection error: {e}")
 
     # 4. FINAL STEP: Release the job to Redis queue!
-    from backend.queue.manager import enqueue_job
+    from backend.task_queue.manager import enqueue_job
     job.status = JobStatus.pending
     db.commit()
     

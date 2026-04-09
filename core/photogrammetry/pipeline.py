@@ -46,13 +46,47 @@ class PhotogrammetryPipeline:
             # Fix common path issues
             path = path.strip()
             
-            # Convert to absolute path if needed
-            if not os.path.isabs(path):
-                path = os.path.abspath(path)
-            
-            # Validate file exists
-            if not os.path.exists(path):
-                raise FileNotFoundError(f"Missing file: {path}")
+            # Check if it's a URL (Cloudinary)
+            if path.startswith('http://') or path.startswith('https://'):
+                # Download to local temp directory
+                try:
+                    import requests
+                    import hashlib
+                    
+                    # Create temp directory for downloads
+                    temp_dir = os.path.join(self.workspace, "downloaded_images")
+                    os.makedirs(temp_dir, exist_ok=True)
+                    
+                    # Generate filename from URL
+                    url_hash = hashlib.md5(path.encode()).hexdigest()
+                    ext = os.path.splitext(path)[1] or '.png'
+                    local_path = os.path.join(temp_dir, f"{url_hash}{ext}")
+                    
+                    # Download if not already downloaded
+                    if not os.path.exists(local_path):
+                        logger.info(f"📥 Downloading: {path}")
+                        response = requests.get(path, timeout=30)
+                        response.raise_for_status()
+                        
+                        with open(local_path, 'wb') as f:
+                            f.write(response.content)
+                        
+                        logger.info(f"✅ Downloaded to: {local_path}")
+                    else:
+                        logger.info(f"✅ Using cached: {local_path}")
+                    
+                    path = local_path
+                except Exception as e:
+                    logger.error(f"❌ Failed to download {path}: {e}")
+                    raise FileNotFoundError(f"Failed to download image: {path}")
+            else:
+                # Convert to absolute path if needed
+                if not os.path.isabs(path):
+                    path = os.path.abspath(path)
+                
+                # Validate file exists
+                if not os.path.exists(path):
+                    raise FileNotFoundError(f"Missing file: {path}")
             
             fixed_paths.append(path)
             logger.info(f"✅ Validated: {path}")

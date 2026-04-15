@@ -79,9 +79,13 @@ class Settings(BaseSettings):
     MAX_UPLOAD_SIZE: int = 500 * 1024 * 1024  # 🏁 v10.0.0: Increased to 500MB for video support
     MAX_IMAGES_PER_JOB: int = 1000  # Increased for video frames
     MIN_IMAGES_PER_JOB: int = 3
-    FRAME_EXTRACTION_FPS: int = 2  # Default to 2 FPS as requested
+    FRAME_EXTRACTION_FPS: int = 10  # Increased (v10.3.3) for better overlap in short videos
     MAX_GPU_MINUTES: int = 30
     MAX_STORAGE_GB: float = 1.0
+    
+    # Strategy Governance (🏁 v10.4.2)
+    WORKER_STRATEGY: str = os.getenv("WORKER_STRATEGY", "push") # 'push' (Modal) or 'pull' (Kaggle)
+    WORKER_TOKEN: str = os.getenv("WORKER_TOKEN", "test-token-123")
     
     # Observability
     OTEL_EXPORTER_OTLP_ENDPOINT: str = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
@@ -98,3 +102,4 @@ class Settings(BaseSettings):
     )
 
 settings = Settings()
+print(f"🛠️  Strategy: {settings.WORKER_STRATEGY}")

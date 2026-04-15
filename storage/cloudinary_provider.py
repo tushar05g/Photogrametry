@@ -44,9 +44,14 @@ class CloudinaryStorageProvider(StorageProvider):
         Resolve a valid URL from Cloudinary by probing common resource types.
         """
         normalized = path.lstrip("/")
+        # 🏁 v10.3.2: Strip extension for API probing if image/video
+        probe_id = normalized
+        if normalized.lower().endswith(('.png', '.jpg', '.jpeg', '.mp4', '.mov')):
+            probe_id = str(Path(normalized).with_suffix(''))
+
         for resource_type in ("image", "video", "raw"):
             try:
-                resource = cloudinary.api.resource(normalized, resource_type=resource_type)
+                resource = cloudinary.api.resource(probe_id, resource_type=resource_type)
                 secure_url = resource.get("secure_url")
                 if secure_url:
                     return secure_url
@@ -98,7 +103,12 @@ class CloudinaryStorageProvider(StorageProvider):
     def download_file(self, path: str, dest_path: Optional[Path] = None) -> Union[bytes, Path]:
         """Download a file from Cloudinary."""
         try:
-            url = self._resolve_existing_url(path)
+            # 🏁 v10.3.3: Use get_url directly if extension is known to bypass API-probing (indexing lag)
+            if path.lower().endswith(('.png', '.jpg', '.jpeg', '.mp4', '.mov', '.zip', '.glb', '.splat')):
+                url = self.get_url(path)
+            else:
+                url = self._resolve_existing_url(path)
+                
             logger.info(f"📥 Downloading from Cloudinary: {url}")
             response = requests.get(url, stream=True)
             response.raise_for_status()
@@ -136,8 +146,8 @@ class CloudinaryStorageProvider(StorageProvider):
                         pid = r["public_id"]
                         fmt = r.get("format")
                         
-                        # Reconstruct extension for images if missing in public_id
-                        if fmt and resource_type == "image" and not pid.lower().endswith("." + fmt.lower()):
+                        # Reconstruct extension if missing in public_id (v10.3.1: Support both image and video)
+                        if fmt and resource_type in ("image", "video") and not pid.lower().endswith("." + fmt.lower()):
                             pid += "." + fmt
                         all_files.append(pid)
                 except Exception as e:

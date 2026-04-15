@@ -5,6 +5,7 @@ import json
 import time
 from pathlib import Path
 from celery import chain
+from celery.exceptions import Ignore
 from backend.core.celery_app import celery_app
 from storage.factory import get_storage_provider
 from shared.schemas import JobStatus, JobStage, StageStatus
@@ -65,21 +66,21 @@ def initiate_pipeline(job_id: str, image_urls: list = None, enable_dense: bool =
         stages.append((task_extract_frames.s(job_id), JobStage.FRAME_EXTRACTION))
     else:
         logger.info(f"Skipping frame extraction for non-video job {job_id}")
-    stages.append((task_download.s(job_id, image_urls), JobStage.DOWNLOAD))
+    stages.append((task_download.si(job_id, image_urls), JobStage.DOWNLOAD))
 
     stages.extend([
-        (task_preprocess.s(), JobStage.PREPROCESS),
-        (task_sfm.s(), JobStage.SFM)
+        (task_preprocess.si(job_id), JobStage.PREPROCESS),
+        (task_sfm.si(job_id), JobStage.SFM)
     ])
     
     if enable_dense:
-        stages.append((task_mvs.s(), JobStage.MVS))
-        stages.append((task_mesh.s(), JobStage.MESH))
+        stages.append((task_mvs.si(job_id), JobStage.MVS))
+        stages.append((task_mesh.si(job_id), JobStage.MESH))
         
     if enable_splat:
-        stages.append((task_splat.s(), JobStage.SPLAT))
+        stages.append((task_splat.si(job_id), JobStage.SPLAT))
         
-    stages.append((task_finalize.s(), JobStage.EXPORT))
+    stages.append((task_finalize.si(job_id), JobStage.EXPORT))
     
     # Don't filter completed stages - keep chain intact
     # Each task checks completion at runtime and skips if already done
@@ -107,16 +108,18 @@ def initiate_pipeline(job_id: str, image_urls: list = None, enable_dense: bool =
         
     # Execute chain of remaining tasks
     pipeline_chain = chain(*tasks_to_run)
-    # Ensure cleanup runs on both success and failure.
+    # Ensure cleanup and webhook run on completion
     cleanup_sig = task_cleanup_assets.si(job_id)
+    webhook_sig = task_send_webhook.si(job_id)
+    
     pipeline_chain.apply_async(
         task_id=f"chain-{job_id}",
-        link=cleanup_sig,
-        link_error=cleanup_sig
+        link=[webhook_sig, cleanup_sig],
+        link_error=[webhook_sig, cleanup_sig]
     )
 
 @celery_app.task(bind=True, name="worker.pipeline.tasks.task_download", max_retries=3)
-def task_download(self, job_id: str, image_urls: list = None):
+def task_download(self, job_id: str, image_urls: list = None, *args, **kwargs):
     if is_stage_completed(job_id, JobStage.DOWNLOAD):
         logger.info(f"⏭️ Stage DOWNLOAD already completed for {job_id}")
         return job_id
@@ -168,9 +171,6 @@ def task_extract_frames(self, job_id: str):
     start_stage(job_id, JobStage.FRAME_EXTRACTION)
     
     try:
-        import modal
-        f = modal.Function.from_name("photogrammetry-worker", "run_mesh")
-        f.remote(job_id)
         from worker.pipeline.video_utils import process_job_videos
         storage = get_storage_provider()
         
@@ -277,6 +277,22 @@ def task_sfm(self, job_id: str):
     start_stage(job_id, JobStage.SFM)
     
     try:
+        if settings.WORKER_STRATEGY == "pull":
+            logger.info(f"⏳ WORKER_STRATEGY is 'pull'. Job {job_id} is waiting for a remote worker to poll it.")
+            # We keep it as PENDING and don't start anything. 
+            # The worker_api.poll() will pick it up and mark it IN_PROGRESS.
+            from backend.core.db import SessionLocal
+            from backend.models.models import Stage
+            with SessionLocal() as db:
+                stage = db.query(Stage).filter(Stage.job_id == job_id, Stage.stage_name == JobStage.SFM).first()
+                if stage:
+                    stage.status = StageStatus.PENDING # Ensure it's pollable
+                    db.commit()
+            
+            # 🏁 v11.0.0: Halt the chain. 
+            # The remote worker will resume by calling /complete which starts the next task.
+            raise Ignore()
+
         import modal
         f = modal.Function.from_name("photogrammetry-worker", "run_sfm")
         # v10.0.0: Capture quality metrics
@@ -301,6 +317,18 @@ def task_sfm(self, job_id: str):
         complete_stage(job_id, JobStage.SFM)
         return job_id
     except Exception as e:
+        error_msg = str(e).lower()
+        if "spend limit reached" in error_msg or "resourceexhausted" in error_msg:
+            logger.warning(f"⚠️ Modal spend limit reached for {job_id}. Falling back to Kaggle remote worker.")
+            from backend.core.db import SessionLocal
+            from backend.models.models import Stage
+            with SessionLocal() as db:
+                stage = db.query(Stage).filter(Stage.job_id == job_id, Stage.stage_name == JobStage.SFM).first()
+                if stage:
+                    stage.status = StageStatus.PENDING # Make pollable again
+                    db.commit()
+            raise Ignore()
+
         logger.error(f"❌ SFM failed: {e}")
         fail_stage(job_id, JobStage.SFM, str(e))
         raise
@@ -327,19 +355,17 @@ def task_mvs(self, job_id: str):
             raise RuntimeError(result.get("error", "MVS stage failed on Modal"))
 
         # Quality Check
-        point_count = result.get("point_count", 0)
+        inner_results = result.get("results", {})
+        point_count = inner_results.get("point_count", 0)
         if point_count < 500:
              msg = f"Low point cloud density ({point_count} points). Output may be sparse."
              update_recommendation(job_id, "Subject surface has no detectable texture. Try adding some patterns or improved lighting.")
              # 🏁 v10.1.0: Soft-fail for MVS
-             complete_stage(job_id, JobStage.MVS, results={
-                 "warning": msg,
-                 "status": "failed_continued",
-                 "point_count": point_count
-             })
+             inner_results["warning"] = msg
+             complete_stage(job_id, JobStage.MVS, results=inner_results)
              return job_id
              
-        complete_stage(job_id, JobStage.MVS, results=result)
+        complete_stage(job_id, JobStage.MVS, results=inner_results)
         return job_id
     except Exception as e:
         logger.warning(f"⚠️ MVS failed but continuing pipeline for {job_id}: {e}")
@@ -420,6 +446,70 @@ def task_splat(self, job_id: str):
 def task_finalize(job_id: str):
     logger.info(f"✅ Finalizing job {job_id}")
     update_job_status(job_id, status=JobStatus.COMPLETED, current_stage=JobStage.EXPORT)
+    return job_id
+
+@celery_app.task(bind=True, name="worker.pipeline.tasks.task_send_webhook", max_retries=5)
+def task_send_webhook(self, job_id: str):
+    """
+    Sends a POST notification to the registered webhook_url with job results.
+    """
+    logger.info(f"📡 Checking for webhook for job {job_id}")
+    with SessionLocal() as db:
+        job = db.query(Job).filter(Job.job_id == job_id).first()
+        if not job or not job.webhook_url:
+            logger.info(f"⏭️ No webhook_url for job {job_id}")
+            return job_id
+
+        webhook_url = job.webhook_url
+        payload = {
+            "job_id": job.job_id,
+            "project_name": job.project_name,
+            "status": job.status.value,
+            "current_stage": job.current_stage.value,
+            "results": job.results,
+            "quality_report": job.quality_report,
+            "updated_at": job.updated_at.isoformat() if job.updated_at else None
+        }
+
+    try:
+        logger.info(f"📤 Sending webhook to {webhook_url}")
+        response = requests.post(webhook_url, json=payload, timeout=10)
+        
+        # 🏁 v10.2.0: Handle unrecoverable 404s
+        if response.status_code == 404:
+            logger.warning(f"🚫 Webhook 404 (Not Found) for job {job_id}. Skipping retries.")
+            with SessionLocal() as db:
+                job = db.query(Job).filter(Job.job_id == job_id).first()
+                if job:
+                    job.webhook_status = "failed"
+                    db.commit()
+            return job_id
+            
+        response.raise_for_status()
+        
+        with SessionLocal() as db:
+            job = db.query(Job).filter(Job.job_id == job_id).first()
+            if job:
+                job.webhook_status = "sent"
+                db.commit()
+        logger.info(f"✅ Webhook sent successfully for job {job_id}")
+        
+    except requests.exceptions.HTTPError as h_err:
+        status_code = getattr(h_err.response, "status_code", None)
+        if status_code and (status_code >= 500 or status_code == 429):
+            logger.warning(f"⚠️ Webhook server error ({status_code}); retrying...")
+            self.retry(exc=h_err, countdown=settings.RETRY_BACKOFF_SECONDS)
+        else:
+            logger.error(f"❌ Permanent webhook failure ({status_code}) for {job_id}")
+            with SessionLocal() as db:
+                job = db.query(Job).filter(Job.job_id == job_id).first()
+                if job:
+                    job.webhook_status = "failed"
+                    db.commit()
+    except Exception as e:
+        logger.warning(f"⚠️ Webhook transient error for {job_id}: {e}; retrying...")
+        self.retry(exc=e, countdown=settings.RETRY_BACKOFF_SECONDS)
+        
     return job_id
 
 @celery_app.task(name="worker.pipeline.tasks.task_cleanup_assets")

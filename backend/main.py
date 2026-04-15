@@ -8,11 +8,11 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from backend.api import upload, scans
-from backend.config import settings
-from backend.core.db import engine, Base
-from backend.core.observability import setup_logging
-from backend.websocket.manager import manager
+from api import upload, scans, worker_api
+from config import settings
+from core.db import engine, Base
+from core.observability import setup_logging
+from websocket.manager import manager
 
 # 🔍 Initialize Advanced Structured Logging (v8.1.0)
 setup_logging()
@@ -42,6 +42,7 @@ app.add_middleware(
 # --- API Routers (MUST be registered before catch-all) ---
 app.include_router(upload.router, prefix=f"{settings.API_V1_STR}/jobs", tags=["Upload"])
 app.include_router(scans.router, prefix=f"{settings.API_V1_STR}/scans", tags=["Status"])
+app.include_router(worker_api.router, prefix=settings.API_V1_STR, tags=["Worker API"])
 
 # --- Static Files ---
 app.mount("/static", StaticFiles(directory="frontend"), name="static")

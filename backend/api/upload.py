@@ -19,7 +19,10 @@ router = APIRouter()
 UNTITLED_SCAN = "Untitled Scan"
 
 @router.post("/init", response_model=JobStatusResponse)
-async def init_job(project_name: str = Form(UNTITLED_SCAN)):
+async def init_job(
+    project_name: str = Form(UNTITLED_SCAN),
+    webhook_url: str = Form(None)
+):
     job_id = str(uuid.uuid4())
     with SessionLocal() as db:
         new_job = Job(
@@ -27,7 +30,9 @@ async def init_job(project_name: str = Form(UNTITLED_SCAN)):
             project_name=project_name,
             status=JobStatus.PENDING,
             current_stage=JobStage.IDLE,
-            is_video=False
+            is_video=False,
+            webhook_url=webhook_url,
+            webhook_status="pending" if webhook_url else None
         )
         db.add(new_job)
         db.commit()
@@ -37,6 +42,7 @@ async def init_job(project_name: str = Form(UNTITLED_SCAN)):
             project_name=new_job.project_name,
             status=new_job.status,
             current_stage=new_job.current_stage,
+            webhook_url=new_job.webhook_url,
             created_at=new_job.created_at,
             updated_at=new_job.updated_at
         )
@@ -80,7 +86,8 @@ async def start_pipeline(job_id: str, enable_splat: bool = True):
 async def upload_images(
     project_name: str = Form(UNTITLED_SCAN),
     files: List[UploadFile] = File(...),
-    enable_splat: bool = Form(True)
+    enable_splat: bool = Form(True),
+    webhook_url: str = Form(None)
 ):
     if len(files) < settings.MIN_IMAGES_PER_JOB:
         raise HTTPException(status_code=400, detail=f"Minimum {settings.MIN_IMAGES_PER_JOB} images required")
@@ -98,7 +105,9 @@ async def upload_images(
             project_name=project_name,
             status=JobStatus.PENDING, 
             current_stage=JobStage.IDLE,
-            is_video=False
+            is_video=False,
+            webhook_url=webhook_url,
+            webhook_status="pending" if webhook_url else None
         )
         db.add(new_job)
         db.commit()
@@ -132,6 +141,7 @@ async def upload_images(
             status=new_job.status,
             current_stage=new_job.current_stage,
             message="Images uploaded and job initiated.",
+            webhook_url=new_job.webhook_url,
             created_at=new_job.created_at,
             updated_at=new_job.updated_at
         )
@@ -150,7 +160,8 @@ async def upload_images(
 async def upload_videos(
     project_name: str = Form(UNTITLED_SCAN),
     files: List[UploadFile] = File(...),
-    enable_splat: bool = Form(True)
+    enable_splat: bool = Form(True),
+    webhook_url: str = Form(None)
 ):
     # For videos, we don't have a strict MIN count yet, but at least 1
     if not files:
@@ -166,7 +177,9 @@ async def upload_videos(
             project_name=project_name,
             status=JobStatus.PENDING, 
             current_stage=JobStage.IDLE,
-            is_video=True
+            is_video=True,
+            webhook_url=webhook_url,
+            webhook_status="pending" if webhook_url else None
         )
         db.add(new_job)
         db.commit()
@@ -188,6 +201,7 @@ async def upload_videos(
             logger.info(f"Uploaded {fname} ({len(file_bytes)} bytes) to {remote_path}")
 
         # 3. Trigger Pipeline Chain (Starting with FRAME_EXTRACTION)
+        from worker.pipeline.tasks import initiate_pipeline
         initiate_pipeline.apply_async(
             kwargs={"job_id": job_id, "enable_splat": enable_splat},
             task_id=f"init-{job_id}"
@@ -199,6 +213,7 @@ async def upload_videos(
             status=new_job.status,
             current_stage=new_job.current_stage,
             message="Videos uploaded and job initiated.",
+            webhook_url=new_job.webhook_url,
             created_at=new_job.created_at,
             updated_at=new_job.updated_at
         )

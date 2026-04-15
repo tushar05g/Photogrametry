@@ -14,6 +14,8 @@ class Job(Base):
     status = Column(SQLEnum(JobStatus), default=JobStatus.PENDING, index=True)
     current_stage = Column(SQLEnum(JobStage), default=JobStage.IDLE, index=True)
     is_video = Column(Boolean, default=False)
+    webhook_url = Column(String, nullable=True)
+    webhook_status = Column(String, nullable=True)  # 'pending', 'sent', 'failed'
     results = Column(JSON, nullable=True)
     quality_report = Column(JSON, nullable=True)
     

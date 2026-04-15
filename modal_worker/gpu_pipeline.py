@@ -16,6 +16,11 @@ class GPUPipeline:
         self.storage = storage
         self.job_id = job_id
         
+        # 🏁 v11.0.1: Headless environment support
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        os.environ["XDG_RUNTIME_DIR"] = "/tmp/runtime-root"
+        Path("/tmp/runtime-root").mkdir(parents=True, exist_ok=True)
+        
         # Paths inside the temporary workspace
         self.images_dir = self.workspace / "images"
         self.sparse_dir = self.workspace / "sparse"
@@ -38,17 +43,21 @@ class GPUPipeline:
 
     def cleanup(self):
         """
-        🏁 v10.0.0: Unified Cleanup Logic
-        Safely removes temporary artifacts from /mnt/storage (Modal Volume).
+        🏁 v10.4.1: Environment-Aware Cleanup Logic
+        Safely removes temporary artifacts from locally or persistent storage.
         """
-        logger.info(f"🧹 Performing unified cleanup for job {self.job_id}")
-        # Points to the persistent storage area
-        storage_base = Path("/mnt/storage/jobs") / self.job_id
+        logger.info(f"🧹 Performing cleanup for job {self.job_id}")
+        
+        # Determine base directory
+        # If /mnt/storage exists, we are likely on Modal with a Volume
+        storage_base = Path("/mnt/storage/jobs") / self.job_id if Path("/mnt/storage").exists() else self.workspace
         
         # Paths to remove
         to_delete = [
             storage_base / "temp",
-            storage_base / "input" / "preprocessed" # Keep raw input, remove intermediate
+            storage_base / "input" / "preprocessed",
+            self.images_dir,
+            self.db_path
         ]
         
         results = {}
@@ -145,17 +154,17 @@ class GPUPipeline:
                 
                 logger.info(f"📥 Sparse: Found {len(files)} files in {remote_sparse_prefix}")
                 
-                # 🏁 v10.1.0: Robust relative path reconstruction
-                # Providers (Modal, Cloudinary) return paths in different formats.
-                # We need to ensure we keep the subdirectory structure (e.g., /0/, /1/).
-                norm_prefix = remote_sparse_prefix.strip("/")
+                # 🏁 v10.1.1: Guaranteed relative path reconstruction
+                # Ensure prefix ends with a slash for clean slicing
+                base_prefix = str(remote_sparse_prefix).rstrip("/") + "/"
+                
                 for f in files:
-                    norm_f = f.strip("/")
-                    if norm_f.startswith(norm_prefix):
-                        rel_path = Path(norm_f[len(norm_prefix):].lstrip("/"))
+                    if f.startswith(base_prefix):
+                        rel_path = f[len(base_prefix):]
+                        logger.info(f"📥 Sparse: Normalized relative path: {rel_path}")
                     else:
                         rel_path = Path(f).name
-                        logger.warning(f"⚠️ Falling back to filename for {f}")
+                        logger.warning(f"⚠️ Falling back to filename for {f} (Prefix mismatch: {base_prefix})")
                         
                     dest = self.sparse_dir / rel_path
                     logger.info(f"📥 Sparse: Downloading {f} to {dest}")
@@ -233,8 +242,8 @@ class GPUPipeline:
                     raise RuntimeError(f"MVS produced empty dense point cloud: {dense_ply}")
                 dest_key = f"jobs/{self.job_id}/output/dense/{self.DENSE_PLY}"
                 results["dense_pcd"] = self.storage.upload_file(dest_key, dense_ply)
-                results["dense_points"] = self._ply_point_count(dense_ply)
-                logger.info(f"📤 Uploaded dense point cloud: {self.DENSE_PLY}")
+                results["point_count"] = self._ply_point_count(dense_ply)
+                logger.info(f"📤 Uploaded dense point cloud: {self.DENSE_PLY}. Points: {results['point_count']}")
             else:
                 logger.error(f"❌ Failed to find {self.DENSE_PLY} for upload after MVS!")
         
@@ -244,7 +253,22 @@ class GPUPipeline:
             if mesh_obj.exists():
                 dest_key = f"jobs/{self.job_id}/output/dense/{self.MESH_OBJ}"
                 results["mesh"] = self.storage.upload_file(dest_key, mesh_obj)
-                logger.info(f"📤 Uploaded final mesh: {self.MESH_OBJ}")
+                
+                # Capture point count from mesh for final reporting
+                import trimesh
+                try:
+                    m = trimesh.load(str(mesh_obj), process=False)
+                    results["point_count"] = len(m.vertices) if hasattr(m, 'vertices') else 0
+                except Exception:
+                    results["point_count"] = 0
+
+                # Push GLB if exists
+                mesh_glb = self.dense_dir / "mesh.glb"
+                if mesh_glb.exists():
+                    glb_key = f"jobs/{self.job_id}/output/dense/mesh.glb"
+                    results["mesh_glb"] = self.storage.upload_file(glb_key, mesh_glb)
+                
+                logger.info(f"📤 Uploaded final mesh formats for {self.job_id}. Points: {results['point_count']}")
             else:
                 logger.error(f"❌ Failed to find {self.MESH_OBJ} for upload after MESH!")
 
@@ -273,9 +297,13 @@ class GPUPipeline:
                     f"jobs/{self.job_id}/output/splat/{self.SPLAT_PREVIEW_GLB}",
                     preview_glb
                 )
-
             if self.splat_metrics:
                 results["splat_metrics"] = self.splat_metrics
+
+        if hasattr(self.storage, "commit"):
+            self.storage.commit()
+            logger.info("💾 Storage commit completed.")
+
         return results
 
     def run_sfm(self, robust: bool = True):
@@ -333,10 +361,26 @@ class GPUPipeline:
         }
 
     def _has_valid_sparse_model(self) -> bool:
-        if not self.sparse_dir.exists(): return False
-        # Check for non-empty subdirs (0, 1, etc)
-        models = [d for d in self.sparse_dir.iterdir() if d.is_dir()]
-        return len(models) > 0
+        return self._find_best_sparse_model() is not None
+
+    def _find_best_sparse_model(self) -> Optional[Path]:
+        """🏁 v10.3.0: Helper to find the sparse model output by SFM containing actual files."""
+        def has_model_files(folder: Path) -> bool:
+            if not folder.exists() or not folder.is_dir(): return False
+            has_cam = (folder / "cameras.bin").exists() or (folder / "cameras.txt").exists()
+            has_img = (folder / "images.bin").exists() or (folder / "images.txt").exists()
+            has_pts = (folder / "points3D.bin").exists() or (folder / "points3D.txt").exists()
+            return has_cam and has_img and has_pts
+
+        if has_model_files(self.sparse_dir):
+            return self.sparse_dir
+            
+        if self.sparse_dir.exists():
+            valid_models = [d for d in self.sparse_dir.iterdir() if d.is_dir() and has_model_files(d)]
+            if valid_models:
+                return sorted(valid_models)[0]
+                
+        return None
 
     def _run_sfm_manual_relaxed(self):
         """Refactored SFM pipeline with lower cognitive complexity."""
@@ -364,7 +408,7 @@ class GPUPipeline:
             "colmap", "exhaustive_matcher", 
             "--database_path", str(self.db_path),
             "--SiftMatching.cross_check", "1",
-            "--FeatureMatching.max_num_matches", "32768"
+            "--SiftMatching.use_gpu", "0" # 🧠 Force CPU for stability on headless Kaggle
         ], "SFM_MATCH_RELAXED")
 
     def _sfm_mapper(self):
@@ -384,12 +428,11 @@ class GPUPipeline:
         ], "SFM_MAP_RELAXED")
 
     def run_mvs(self):
-        # The automatic_reconstructor might put results in sparse/0
-        sparse_model = self.sparse_dir / "0"
-        if not sparse_model.exists():
-            models = sorted([d for d in self.sparse_dir.iterdir() if d.is_dir()])
-            if not models: raise RuntimeError("No sparse model found for MVS")
-            sparse_model = models[0]
+        # 🏁 v10.3.0: Robust model discovery (checks for actual model files)
+        sparse_model = self._find_best_sparse_model()
+        if not sparse_model:
+            raise RuntimeError(f"No valid sparse model found in {self.sparse_dir} for MVS")
+        logger.info(f"📍 Using sparse model: {sparse_model}")
 
         self.run_command([
             "colmap", "image_undistorter", 
@@ -598,6 +641,17 @@ class GPUPipeline:
             
             # Final Save
             ms.save_current_mesh(str(final_mesh_obj), save_vertex_color=True)
+            
+            # --- Step 4: Export GLB for Web/AR ---
+            try:
+                import trimesh
+                mesh = trimesh.load(str(final_mesh_obj), process=False)
+                glb_path = self.dense_dir / "mesh.glb"
+                mesh.export(str(glb_path))
+                logger.info(f"✅ GLB export complete: {glb_path.name}")
+            except Exception as ge:
+                logger.warning(f"⚠️ GLB export failed: {ge}")
+                
             logger.info(f"✅ Mesh generation complete: {final_mesh_obj.name}")
             
         except Exception as e:
@@ -633,6 +687,22 @@ class GPUPipeline:
                 except Exception as he:
                     logger.error(f"❌ Convex hull fallback failed: {he}")
                     raise RuntimeError(f"Failed to generate mesh: {e}")
+                    
+        # 📊 Capture final metrics
+        final_points = 0
+        try:
+            if final_mesh_obj.exists():
+                import trimesh
+                m = trimesh.load(str(final_mesh_obj), process=False)
+                final_points = len(m.vertices) if hasattr(m, 'vertices') else 0
+        except Exception as te:
+            logger.warning(f"Could not extract mesh metrics: {te}")
+
+        return {
+            "status": "success",
+            "mesh_generated": True,
+            "point_count": final_points
+        }
 
     def run_splat(self):
         """

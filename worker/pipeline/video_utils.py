@@ -9,7 +9,7 @@ from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
-MIN_VIDEO_DURATION_SECONDS = 1.0
+MIN_VIDEO_DURATION_SECONDS = 0.1
 MAX_VIDEO_DURATION_SECONDS = 180.0
 
 def validate_video_file(video_path: Path, job_id: str = "unknown") -> None:
@@ -86,7 +86,7 @@ def extract_frames_from_video(
             frame_name = f"frame_{video_path.stem}_{frame_count:06d}.jpg"
             frame_path = output_dir / frame_name
             
-            # Save frame
+            # Save frame at high quality for 3D reconstruction
             cv2.imwrite(str(frame_path), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
             extracted_paths.append(frame_path)
             

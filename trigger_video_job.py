@@ -5,34 +5,33 @@ from pathlib import Path
 # Base URL of the API
 API_BASE = "http://localhost:8000/api/v1"
 
-# Target Webhook (Placeholder for logging verification)
+# Target Webhook
 WEBHOOK_URL = "https://webhook.site/placeholder-v11-test"
 
-def get_images():
-    image_dir = Path("./assets/turtle_images")
-    return list(image_dir.glob("*.png"))
+def get_videos():
+    video_dir = Path("./assets/mouse_videos")
+    return list(video_dir.glob("*.mp4"))
 
 def trigger():
-    images = get_images()
-    print(f"🚀 Found {len(images)} images in {Path('./assets/turtle_images').absolute()}")
+    videos = get_videos()
+    print(f"🚀 Found {len(videos)} videos in {Path('./assets/mouse_videos').absolute()}")
     
-    if not images:
-        print("❌ No images found!")
+    if not videos:
+        print("❌ No videos found!")
         return None
 
-    print(f"📦 Uploading for Turtle reconstruction...")
+    print(f"📦 Uploading for Mouse video reconstruction...")
     
     # Prepare files and form data
-    files = [('files', (img.name, open(img, 'rb'), 'image/png')) for img in images]
+    files = [('files', (vid.name, open(vid, 'rb'), 'video/mp4')) for vid in videos]
     data = {
-        "project_name": "Turtle Reconstruction v11 (Webhook Test)",
+        "project_name": "Mouse Video Reconstruction (Phase 1 Baseline)",
         "enable_splat": "true",
         "webhook_url": WEBHOOK_URL
     }
     
     try:
-        # CORRECT ENDPOINT: /jobs/upload
-        resp = requests.post(f"{API_BASE}/jobs/upload", files=files, data=data)
+        resp = requests.post(f"{API_BASE}/jobs/upload-video", files=files, data=data)
         if resp.status_code == 200:
             job_data = resp.json()
             print(f"✅ Job initiated successfully!")

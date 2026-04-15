@@ -33,6 +33,7 @@ class JobStatusResponse(BaseModel):
     status: JobStatus
     current_stage: JobStage
     message: Optional[str] = None
+    webhook_url: Optional[str] = None
     results: Optional[Dict[str, str]] = None
     created_at: datetime
     updated_at: datetime

@@ -34,10 +34,9 @@ def get_job_progress(job_id: str, db: Session = Depends(get_db)):
     elif job.status == JobStatus.FAILED:
         progress_str = "Failed"
 
-    # 🏁 v10.1.0: Smart Model URL Selection
-    # Prioritize viewable assets for the Three.js viewer: GLB (Mesh/Splat) > PLY (Points)
+    # 🏁 v11.0.0: Prioritize GLB for the Three.js viewer
     results = job.results or {}
-    model_url = results.get("mesh") or results.get("model_url")
+    model_url = results.get("mesh_glb") or results.get("mesh") or results.get("model_url")
     
     if not model_url:
         # Check for Splat preview (converted to GLB for viewer compatibility)
@@ -50,6 +49,18 @@ def get_job_progress(job_id: str, db: Session = Depends(get_db)):
     # Warnings can come from any stage (MVS, MESH, etc.)
     warning = results.get("warning") or results.get("mesh_warning")
     
+    # Get error_message from results or from current stage if failed
+    error_message = results.get("error")
+    if job.status == JobStatus.FAILED and not error_message:
+        # Check current stage for error message
+        from backend.models.models import Stage
+        current_stage = db.query(Stage).filter(
+            Stage.job_id == job_id,
+            Stage.stage_name == job.current_stage
+        ).first()
+        if current_stage and current_stage.error_message:
+            error_message = current_stage.error_message
+    
     return {
         "job_id": job.job_id,
         "project_name": job.project_name,
@@ -57,7 +68,9 @@ def get_job_progress(job_id: str, db: Session = Depends(get_db)):
         "progress": progress_str,
         "current_stage": job.current_stage.value,
         "model_url": model_url,
-        "error_message": results.get("error"),
+        "webhook_url": job.webhook_url,
+        "webhook_status": job.webhook_status,
+        "error_message": error_message,
         "warnings": warning,
         "created_at": job.created_at,
         "updated_at": job.updated_at
@@ -76,15 +89,28 @@ def cancel_job(job_id: str, db: Session = Depends(get_db)):
     return {"status": "cancelled", "job_id": job_id}
 
 @router.get("/{job_id}/download")
-def download_model(job_id: str, db: Session = Depends(get_db)):
-    """Direct download link for the generated model."""
+def download_model(job_id: str, format: str = "obj", db: Session = Depends(get_db)):
+    """Direct download link for the generated model with format preference (obj, glb, splat)."""
     job = db.query(Job).filter(Job.job_id == job_id).first()
     if not job or not job.results:
-        raise HTTPException(status_code=404, detail="Model not found")
+        raise HTTPException(status_code=404, detail="Model results not found")
     
-    url = job.results.get("model_url") or job.results.get("mesh_url") or job.results.get("splat_url")
+    results = job.results
+    url = None
+    
+    if format.lower() == "glb":
+        url = results.get("mesh_glb")
+    elif format.lower() == "obj":
+        url = results.get("mesh") or results.get("model_url")
+    elif format.lower() == "splat":
+        url = results.get("splat_url")
+    
+    # Final fallback logic
     if not url:
-        raise HTTPException(status_code=404, detail="Download URL not available")
+        url = results.get("mesh_glb") or results.get("mesh") or results.get("model_url") or results.get("splat_url")
+        
+    if not url:
+        raise HTTPException(status_code=404, detail=f"Download URL for format '{format}' not available")
     
     from fastapi.responses import RedirectResponse
     return RedirectResponse(url=url)

@@ -213,12 +213,41 @@ class GPUPipeline:
             for p in sparse_files:
                 if p.is_file():
                     rel = p.relative_to(self.sparse_dir)
+                    
+                    # Skip .bin files and convert to PLY instead
+                    if str(rel).endswith(".bin"):
+                        if "points3D" in str(rel):
+                            logger.info(f"⚙️  Converting .bin to .ply: {rel}")
+                            # Convert COLMAP .bin to PLY for cloud storage compatibility
+                            sparse_model = self.sparse_dir / p.parent.name
+                            ply_output = p.parent / "points3D.ply"
+                            try:
+                                self.run_command([
+                                    "colmap", "model_converter",
+                                    "--input_path", str(sparse_model),
+                                    "--output_path", str(ply_output),
+                                    "--output_type", "PLY"
+                                ], "SFM_BIN_TO_PLY")
+                                if ply_output.exists():
+                                    rel = ply_output.relative_to(self.sparse_dir)
+                                    p = ply_output
+                                    logger.info(f"✅ Converted to: {rel}")
+                            except Exception as e:
+                                logger.warning(f"Failed to convert .bin to .ply: {e}")
+                                continue
+                        else:
+                            logger.info(f"⏭️  Skipping non-points3D .bin file: {rel}")
+                            continue
+                    
                     dest_key = f"jobs/{self.job_id}/output/sparse/{rel}"
                     logger.info(f"📤 SFM: Uploading {rel} to {dest_key}")
-                    url = self.storage.upload_file(dest_key, p)
-                    if str(rel) in ["points3D.bin", "points3D.ply"]:
-                        results["sparse_pcd"] = url
-                    logger.info(f"📤 Uploaded sparse file: {rel}")
+                    try:
+                        url = self.storage.upload_file(dest_key, p)
+                        if str(rel) in ["points3D.bin", "points3D.ply"]:
+                            results["sparse_pcd"] = url
+                        logger.info(f"📤 Uploaded sparse file: {rel}")
+                    except Exception as e:
+                        logger.warning(f"⚠️  Failed to upload {rel}: {e}. Continuing with other files...")
             # Export a stable sparse points metric for downstream quality diagnosis.
             sparse_model = self.sparse_dir / "0"
             if not sparse_model.exists():

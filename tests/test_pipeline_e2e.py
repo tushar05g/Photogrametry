@@ -7,21 +7,26 @@ from pathlib import Path
 BASE_URL = "http://localhost:8000"
 API_V1 = f"{BASE_URL}/api/v1"
 
+# Get project root directory (parent of 'tests' directory)
+PROJECT_ROOT = Path(__file__).parent.parent
+ASSETS_DIR = PROJECT_ROOT / "assets" / "cube_images"
+
 def test_pipeline_e2e():
     print("🚀 Starting E2E Pipeline Test")
     
     # 1. Prepare images
-    image_dir = "/home/harpreet/Documents/3d_scanner/assets/cube_images"
-    image_files = glob.glob(f"{image_dir}/*.png")
+    image_files = list(ASSETS_DIR.glob("*.png"))
+    print(f"📁 Looking for images in: {ASSETS_DIR}")
     print(f"📁 Found {len(image_files)} images")
     
     if not image_files:
         print("❌ No images found. Make sure assets/cube_images/ contains PNG files.")
+        print(f"   Expected path: {ASSETS_DIR}")
         return
 
     # 2. Upload images
     print("📤 Uploading images...")
-    files = [("files", (Path(f).name, open(f, "rb"), "image/png")) for f in image_files]
+    files = [("files", (img.name, open(img, "rb"), "image/png")) for img in image_files]
     
     response = requests.post(f"{API_V1}/jobs/upload", files=files)
     if response.status_code != 200:

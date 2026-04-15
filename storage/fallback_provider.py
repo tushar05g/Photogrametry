@@ -9,9 +9,10 @@ class FallbackStorageProvider(StorageProvider):
     def _normalize_path(self, path: str) -> str:
         return str(path).lstrip("/")
 
-    def __init__(self, primary: StorageProvider, secondary: StorageProvider):
+    def __init__(self, primary: StorageProvider, secondary: StorageProvider, tertiary: Optional[StorageProvider] = None):
         self.primary = primary
         self.secondary = secondary
+        self.tertiary = tertiary  # Optional third-level fallback
 
     def _path_exists(self, provider: StorageProvider, path: str) -> bool:
         """
@@ -54,7 +55,21 @@ class FallbackStorageProvider(StorageProvider):
             return primary_result
         except Exception as e:
             logger.warning(f"Primary storage failed, falling back to secondary: {e}")
-            return self.secondary.upload_file(path, data)
+            try:
+                secondary_result = self.secondary.upload_file(path, data)
+                # Best-effort replication to tertiary
+                if self.tertiary:
+                    try:
+                        self.tertiary.upload_file(path, data)
+                    except Exception:
+                        logger.debug(f"Tertiary mirror skipped for {path}")
+                return secondary_result
+            except Exception as e2:
+                if self.tertiary:
+                    logger.warning(f"Secondary storage failed, falling back to tertiary: {e2}")
+                    return self.tertiary.upload_file(path, data)
+                else:
+                    raise
 
     def download_file(self, path: str, local_path: Optional[Path] = None) -> Union[bytes, Path]:
         path = self._normalize_path(path)
@@ -62,7 +77,14 @@ class FallbackStorageProvider(StorageProvider):
             return self.primary.download_file(path, local_path)
         except Exception:
             logger.debug(f"Primary download failed for {path}, trying secondary")
-            return self.secondary.download_file(path, local_path)
+            try:
+                return self.secondary.download_file(path, local_path)
+            except Exception:
+                if self.tertiary:
+                    logger.debug(f"Secondary download failed for {path}, trying tertiary")
+                    return self.tertiary.download_file(path, local_path)
+                else:
+                    raise
 
     def list_files(self, path: str) -> List[str]:
         # Merge results or try primary then secondary

@@ -30,10 +30,11 @@ def get_storage_provider() -> StorageProvider:
         return ModalStorageProvider()
     elif storage_type == "cloudinary":
         from storage.fallback_provider import FallbackStorageProvider
-        logger.info("Using CloudinaryStorageProvider with Modal fallback")
+        logger.info("Using CloudinaryStorageProvider with Modal fallback + Local tertiary")
         primary = CloudinaryStorageProvider()
         secondary = ModalStorageProvider()
-        return FallbackStorageProvider(primary, secondary)
+        tertiary = LocalStorageProvider(base_path=settings.STORAGE_BASE_DIR)  # Local fallback
+        return FallbackStorageProvider(primary, secondary, tertiary)
     else:
         logger.info(f"Using LocalStorageProvider (base_path={settings.STORAGE_BASE_DIR})")
         return LocalStorageProvider(base_path=settings.STORAGE_BASE_DIR)

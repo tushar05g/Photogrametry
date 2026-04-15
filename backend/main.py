@@ -8,11 +8,11 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from api import upload, scans, worker_api
-from config import settings
-from core.db import engine, Base
-from core.observability import setup_logging
-from websocket.manager import manager
+from backend.api import upload, scans, worker_api
+from backend.config import settings
+from backend.core.db import engine, Base
+from backend.core.observability import setup_logging
+from backend.websocket.manager import manager
 
 # 🔍 Initialize Advanced Structured Logging (v8.1.0)
 setup_logging()

@@ -12,6 +12,23 @@ class Settings(BaseSettings):
     # Base URL for static file serving
     BASE_URL: str = os.getenv("BASE_URL", "http://localhost:8000")
     
+    # CORS Configuration (⭐ Security: Restrict to known origins)
+    CORS_ORIGINS: list = [
+        "http://localhost",
+        "http://localhost:3000",
+        "http://localhost:8000",
+        "http://localhost:8080",
+        "http://127.0.0.1",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:8000",
+    ]
+    
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # Add environment-based origins if provided
+        if env_origins := os.getenv("CORS_ORIGINS"):
+            self.CORS_ORIGINS.extend([o.strip() for o in env_origins.split(",")])
+    
     # Persistence & Orchestration
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./photogrammetry.db")
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")

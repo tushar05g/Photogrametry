@@ -111,24 +111,27 @@ class KaggleWorker:
             if sfm_res.get("status") == "failed":
                 self.update_stage(job_id, JobStage.SFM, StageStatus.FAILED, error=sfm_res.get("error"))
                 return
-
+            sfm_outputs = pipeline.push_output("SFM")
+            
             # 3. MVS
             self.update_stage(job_id, JobStage.MVS, StageStatus.IN_PROGRESS)
             mvs_res = pipeline.run_mvs()
+            mvs_outputs = pipeline.push_output("MVS")
             
             # 4. MESH
             self.update_stage(job_id, JobStage.MESH, StageStatus.IN_PROGRESS)
             mesh_res = pipeline.run_mesh()
+            mesh_outputs = pipeline.push_output("MESH")
             
             # 5. Complete
             final_results = {
-                "mesh": mesh_res.get("model_url"),
-                "mesh_glb": mesh_res.get("mesh_glb"),
-                "sparse_pcd": sfm_res.get("sparse_pcd"),
-                "dense_pcd": mvs_res.get("dense_pcd"),
-                "point_count": mvs_res.get("point_count"),
+                "mesh": mesh_outputs.get("mesh"),
+                "mesh_glb": mesh_outputs.get("mesh_glb"),
+                "sparse_pcd": sfm_outputs.get("sparse_pcd"),
+                "dense_pcd": mvs_outputs.get("dense_pcd"),
+                "point_count": mesh_outputs.get("point_count") or mvs_outputs.get("point_count") or sfm_res.get("point_count", 0),
                 "worker_id": self.worker_id,
-                "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.get_gmtime())
+                "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             }
             
             url = f"{self.backend_url}/api/v1/worker/{job_id}/complete"

@@ -317,6 +317,8 @@ def task_sfm(self, job_id: str):
         complete_stage(job_id, JobStage.SFM)
         return job_id
     except Exception as e:
+        if isinstance(e, Ignore):
+            raise
         error_msg = str(e).lower()
         if "spend limit reached" in error_msg or "resourceexhausted" in error_msg:
             logger.warning(f"⚠️ Modal spend limit reached for {job_id}. Falling back to Kaggle remote worker.")

@@ -20,6 +20,10 @@ class GPUPipeline:
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
         os.environ["XDG_RUNTIME_DIR"] = "/tmp/runtime-root"
         Path("/tmp/runtime-root").mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod("/tmp/runtime-root", 0o700)
+        except Exception as e:
+            logger.warning(f"Could not set 0700 permissions on /tmp/runtime-root: {e}")
         
         # Paths inside the temporary workspace
         self.images_dir = self.workspace / "images"
@@ -441,11 +445,15 @@ class GPUPipeline:
             "--output_path", str(self.dense_dir)
         ], "MVS_UNDISTORT")
         
-        self.run_command([
-            "colmap", "patch_match_stereo", 
-            "--workspace_path", str(self.dense_dir),
-            "--PatchMatchStereo.min_triangulation_angle", "0.5"
-        ], "MVS_STEREO")
+        try:
+            self.run_command([
+                "colmap", "patch_match_stereo", 
+                "--workspace_path", str(self.dense_dir),
+                "--PatchMatchStereo.min_triangulation_angle", "0.5"
+            ], "MVS_STEREO")
+        except Exception as e:
+            logger.warning(f"⚠️ MVS_STEREO failed (likely due to missing CUDA): {e}. Skipping to fusion...")
+            # We don't raise here, we try to move to fusion which may have a fallback
         
         self.run_command([
             "colmap", "stereo_fusion", 

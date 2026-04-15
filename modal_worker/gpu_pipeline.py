@@ -16,9 +16,17 @@ class GPUPipeline:
         self.storage = storage
         self.job_id = job_id
         
-        # 🏁 v11.0.1: Headless environment support
+        # 🏁 v11.2.0: Aggressive Headless Environment Fixes
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        os.environ["PYMESHLAB_OFFSCREEN"] = "1"
         os.environ["XDG_RUNTIME_DIR"] = "/tmp/runtime-root"
+        
+        # Dynamic LD_PRELOAD for Kaggle/Headless stability
+        for lib_path in ["/usr/lib/x86_64-linux-gnu/libstdc++.so.6", "/lib/x86_64-linux-gnu/libstdc++.so.6"]:
+            if Path(lib_path).exists():
+                os.environ["LD_PRELOAD"] = lib_path
+                break
+
         Path("/tmp/runtime-root").mkdir(parents=True, exist_ok=True)
         try:
             os.chmod("/tmp/runtime-root", 0o700)
@@ -428,12 +436,13 @@ class GPUPipeline:
             "colmap", "feature_extractor", 
             "--database_path", str(self.db_path), 
             "--image_path", str(self.images_dir),
-            "--ImageReader.camera_model", "OPENCV", # 🧠 SWITCHED from RADIAL
+            "--ImageReader.camera_model", "OPENCV",
             "--ImageReader.single_camera", "1",
-            "--SiftExtraction.max_num_features", "16384",  # High density
+            "--ImageReader.default_focal_length_factor", "1.1", # Better for synthetic/web
+            "--SiftExtraction.max_num_features", "32768",  # Ultra high density
             "--SiftExtraction.estimate_affine_shape", "1",
             "--SiftExtraction.domain_size_pooling", "1"
-        ], "SFM_FE_RELAXED")
+        ], "SFM_FE_ULTRA")
 
     def _sfm_match_features(self):
         """Helper: Feature matching."""
@@ -528,37 +537,46 @@ class GPUPipeline:
 
     def _find_pml_filter(self, ms, keyword: str) -> str:
         """Helper to find the best available PyMeshLab filter name."""
-        try:
-            filters = ms.filter_list()
-            # Priority 1: Exact match (case insensitive)
-            for f in filters:
-                if keyword.lower() == f.lower():
-                    return f
-            
-            # Priority 2: Fuzzy match with EXCLUSION of sampling
-            # This is critical to avoid 'generate_sampling_poisson_disk'
-            matches = [f for f in filters if keyword.lower() in f.lower()]
-            if 'poisson' in keyword.lower() or 'reconstruction' in keyword.lower():
-                matches = [m for m in matches if 'sampling' not in m.lower() and 'disk' not in m.lower()]
-            
-            if matches:
-                # Return the shortest match (usually the most specific/standard)
-                return min(matches, key=len)
-            
-            return None
-        except Exception as e:
-            logger.warning(f"⚠️ Error in _find_pml_filter: {e}")
-            return None
-
     def _mesh_count(self, ms) -> int:
         """
         PyMeshLab compatibility helper across versions.
         """
-        if hasattr(ms, "number_meshes"):
-            return ms.number_meshes()
-        if hasattr(ms, "number_of_meshes"):
-            return ms.number_of_meshes()
+        for attr in ["number_meshes", "number_of_meshes", "mesh_number"]:
+            if hasattr(ms, attr):
+                try:
+                    return getattr(ms, attr)()
+                except: pass
         return 0
+
+    def _find_pml_filter(self, ms, query: str) -> Optional[str]:
+        """
+        🏁 v11.3.0: Robust filter discovery for modern PyMeshLab.
+        Uses direct checking if filter_list is missing.
+        """
+        # Modern PyMeshLab check
+        try:
+            # Map common names to modern filter functions
+            mapping = {
+                "poisson": "generate_surface_reconstruction_screened_poisson",
+                "screened_poisson": "generate_surface_reconstruction_screened_poisson",
+                "ball_pivoting": "generate_surface_reconstruction_ball_pivoting",
+                "normal": "compute_normal_for_point_sets",
+                "smooth": "apply_coord_laplacian_smoothing",
+                "transfer": "transfer_attributes_to_limit_surface"
+            }
+            mapped = mapping.get(query.lower())
+            if mapped and hasattr(ms, mapped):
+                return mapped
+        except: pass
+
+        # Fallback to searching the filter dictionary if it exists
+        try:
+            if hasattr(ms, "filter_list"):
+                for f in ms.filter_list():
+                    if query.lower() in f.lower():
+                        return f
+        except: pass
+        return None
 
     def run_mesh(self):
         dense_ply = self.dense_dir / self.DENSE_PLY
@@ -569,7 +587,14 @@ class GPUPipeline:
         
         # Using PyMeshLab for robust meshing and colorization
         try:
-            import pymeshlab
+            try:
+                import pymeshlab
+            except ImportError as ie:
+                if "undefined symbol" in str(ie):
+                    logger.error("❌ PyMeshLab loading failed due to binary incompatibility (symbol error).")
+                    logger.error("💡 FIX: Set LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6 in your environment.")
+                raise ie
+
             logger.info("📐 Generating mesh using PyMeshLab (Screened Poisson)...")
             ms = pymeshlab.MeshSet()
             
@@ -594,7 +619,9 @@ class GPUPipeline:
                      self._find_pml_filter(ms, "compute_normal_for_vertex") or \
                      self._find_pml_filter(ms, "normal")
                 if nf:
-                    try: ms.apply_filter(nf, k=30)
+                    try: 
+                        # Try with parameters first
+                        ms.apply_filter(nf, k=30)
                     except: 
                         try: ms.apply_filter(nf)
                         except: pass
@@ -609,7 +636,11 @@ class GPUPipeline:
                 logger.info(f"📐 Applying Reconstruction using filter: {pf}")
                 try:
                     if "poisson" in pf.lower():
-                        ms.apply_filter(pf, depth=8, samplespernode=1, pointweight=4)
+                        # Modern PyMeshLab uses samplespernode, pre-v2022 used samples_per_node
+                        try:
+                            ms.apply_filter(pf, depth=8, samplespernode=1, pointweight=4)
+                        except:
+                            ms.apply_filter(pf, depth=8)
                     else:
                         ms.apply_filter(pf)
                 except Exception as e:

@@ -67,16 +67,22 @@ class CloudinaryStorageProvider(StorageProvider):
                 # If bytes, we'll use a temporary file or upload directly
                 import io
                 file_obj = io.BytesIO(data)
-                # 🏁 v10.1.0: Strip extension for Cloudinary public_id (images/videos)
+                
+                # 🏁 v11.1.0: Better extension handling
                 public_id = path
+                resource_type = "auto"
+                
+                # Strip extension for image/video resource types in Cloudinary
                 if path.lower().endswith(('.png', '.jpg', '.jpeg', '.mp4', '.mov')):
                     public_id = str(Path(path).with_suffix(''))
+                elif path.lower().endswith(('.ply', '.obj', '.zip', '.glb', '.splat')):
+                    resource_type = "raw"
 
                 resp = cloudinary.uploader.upload(
                     file_obj,
                     public_id=public_id,
                     overwrite=True,
-                    resource_type="auto",
+                    resource_type=resource_type,
                     invalidate=True,
                     unique_filename=False,
                     use_filename=True
@@ -84,11 +90,21 @@ class CloudinaryStorageProvider(StorageProvider):
             else:
                 # If path or str
                 local_path = str(data)
+                
+                # 🏁 v11.1.0: Consistent public_id and resource_type mapping
+                public_id = path
+                resource_type = "auto"
+                
+                if path.lower().endswith(('.png', '.jpg', '.jpeg', '.mp4', '.mov')):
+                    public_id = str(Path(path).with_suffix(''))
+                elif path.lower().endswith(('.ply', '.obj', '.zip', '.glb', '.splat')):
+                    resource_type = "raw"
+
                 resp = cloudinary.uploader.upload(
                     local_path,
-                    public_id=path,
+                    public_id=public_id,
                     overwrite=True,
-                    resource_type="auto",
+                    resource_type=resource_type,
                     invalidate=True,
                     unique_filename=False,
                     use_filename=True

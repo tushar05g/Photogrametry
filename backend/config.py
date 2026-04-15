@@ -96,7 +96,7 @@ class Settings(BaseSettings):
     MAX_UPLOAD_SIZE: int = 500 * 1024 * 1024  # 🏁 v10.0.0: Increased to 500MB for video support
     MAX_IMAGES_PER_JOB: int = 1000  # Increased for video frames
     MIN_IMAGES_PER_JOB: int = 3
-    FRAME_EXTRACTION_FPS: int = 10  # Increased (v10.3.3) for better overlap in short videos
+    FRAME_EXTRACTION_FPS: int = 20  # Increased (v11.2.0) for ultra-high density overlap
     MAX_GPU_MINUTES: int = 30
     MAX_STORAGE_GB: float = 1.0
     

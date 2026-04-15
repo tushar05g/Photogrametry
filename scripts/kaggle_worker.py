@@ -120,16 +120,22 @@ class KaggleWorker:
             
             # 4. MESH
             self.update_stage(job_id, JobStage.MESH, StageStatus.IN_PROGRESS)
-            mesh_res = pipeline.run_mesh()
+            mesh_res = pipeline.run_mesh(job_id)
             mesh_outputs = pipeline.push_output("MESH")
             
-            # 5. Complete
+            # 5. SPLAT (v14 Update)
+            self.update_stage(job_id, JobStage.SPLAT, StageStatus.IN_PROGRESS)
+            splat_res = pipeline.run_splat()
+            splat_outputs = pipeline.push_output("SPLAT")
+            
+            # 6. Complete
             final_results = {
                 "mesh": mesh_outputs.get("mesh"),
                 "mesh_glb": mesh_outputs.get("mesh_glb"),
+                "splat": splat_outputs.get("splat"),
                 "sparse_pcd": sfm_outputs.get("sparse_pcd"),
                 "dense_pcd": mvs_outputs.get("dense_pcd"),
-                "point_count": mesh_outputs.get("point_count") or mvs_outputs.get("point_count") or sfm_res.get("point_count", 0),
+                "point_count": mesh_res.get("face_count", 0) if mesh_res.get("status") == "completed" else 0,
                 "worker_id": self.worker_id,
                 "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             }
